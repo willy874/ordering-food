@@ -1,0 +1,6 @@
+docs/
+zbpack.json
+server/smoke.js
+server/seed.js
+.env
+.env.local

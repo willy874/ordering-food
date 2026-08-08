@@ -17,12 +17,17 @@ dns.setDefaultResultOrder('ipv4first');
 
 const isLocal = /localhost|127\.0\.0\.1/.test(process.env.DATABASE_URL);
 
+// Vercel 上每個函式實例都是獨立程序，可能同時存在數十個。
+// 每個實例各開一池會很快耗盡 Postgres 連線數，因此限制為 1，
+// 真正的併發交給 Neon 的 pooler（連線字串中的 -pooler）處理。
+const isServerless = Boolean(process.env.VERCEL);
+
 export const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   // Neon 憑證可通過完整驗證，不需放寬 rejectUnauthorized
   ssl: isLocal ? false : true,
-  max: 5,
-  idleTimeoutMillis: 10_000,
+  max: isServerless ? 1 : 5,
+  idleTimeoutMillis: isServerless ? 5_000 : 10_000,
 });
 
 pool.on('error', (err) => {
