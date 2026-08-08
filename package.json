@@ -1,0 +1,29 @@
+{
+  "name": "ordering-food",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "團購訂餐系統",
+  "license": "ISC",
+  "engines": {
+    "node": ">=20.6"
+  },
+  "scripts": {
+    "dev": "concurrently -n server,client -c blue,magenta \"npm:dev:server\" \"npm:dev:client\"",
+    "dev:server": "node --env-file=.env --watch server/index.js",
+    "dev:client": "npm --prefix client run dev",
+    "build": "npm --prefix client ci && npm --prefix client run build",
+    "start": "node server/index.js",
+    "migrate": "node --env-file=.env server/migrations/run.js",
+    "seed": "node --env-file=.env server/seed.js",
+    "smoke": "node --env-file=.env server/smoke.js"
+  },
+  "dependencies": {
+    "express": "^5.1.0",
+    "pg": "^8.13.1",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2"
+  }
+}

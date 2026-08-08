@@ -1,0 +1,5 @@
+{
+  "node_version": "22",
+  "build_command": "npm ci && npm run build",
+  "start_command": "node server/index.js"
+}
