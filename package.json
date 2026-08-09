@@ -14,6 +14,8 @@
     "dev:client": "npm --prefix client run dev",
     "build": "npm --prefix client ci && npm --prefix client run build",
     "start": "node server/index.js",
+    "deploy": "bash scripts/deploy.sh production",
+    "deploy:preview": "bash scripts/deploy.sh preview",
     "migrate": "node --env-file=.env server/migrations/run.js",
     "db:pull": "drizzle-kit pull",
     "seed": "node --env-file=.env server/seed.js",

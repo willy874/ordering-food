@@ -130,12 +130,23 @@ npx vercel deploy --prod --yes
 
 ## 後續部署
 
-目前**尚未連結 GitHub 自動部署**，每次要手動：
+目前**尚未連結 GitHub 自動部署**，push 不會觸發任何東西，每次要手動：
 
 ```bash
-npx vercel deploy --prod --yes     # 正式環境
-npx vercel deploy --yes            # 預覽環境
+npm run deploy             # 正式環境
+npm run deploy:preview     # 預覽環境
 ```
+
+`scripts/deploy.sh` 做的事就是下面這兩件，包成一支是因為兩件都很容易忘：
+
+```bash
+npx vercel deploy --prod --yes --scope take-6570   # 專案在團隊底下，少了 --scope 會回 Not authorized
+curl -s https://ordering-food-mu.vercel.app/api/health   # 部署完打幾支端點確認這一版真的活著
+```
+
+腳本會先提醒工作區有沒有未提交／未 push 的變更（**Vercel CLI 上傳的是本機檔案，不是 GitHub 上那份**），部署完再驗四件事：健康檢查、`/api/groups/active` 回得出 JSON 陣列、未知 API 回 404、深層路由回 200。有一項不過就以非 0 結束。
+
+團隊或網址換了的話用環境變數覆寫，不必改腳本：`VERCEL_SCOPE`、`DEPLOY_VERIFY_URL`。憑證過期時腳本會提示先跑 `npx vercel login`。
 
 要改成 push 即部署，到 Vercel 專案設定連結 GitHub repo（需在 repo 安裝 Vercel 的 GitHub App）。
 
