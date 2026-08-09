@@ -3,13 +3,14 @@ import {
   Alert,
   Box,
   Button,
+  ButtonBase,
   Card,
   Checkbox,
   Chip,
+  Collapse,
   Dialog,
   DialogActions,
   DialogContent,
-  DialogContentText,
   DialogTitle,
   Divider,
   FormControlLabel,
@@ -28,13 +29,12 @@ import RemoveIcon from '@mui/icons-material/Remove';
 import SearchIcon from '@mui/icons-material/Search';
 import ClearIcon from '@mui/icons-material/Clear';
 import EditIcon from '@mui/icons-material/Edit';
+import ExpandLessIcon from '@mui/icons-material/ExpandLess';
 import { api } from '../lib/api.js';
 import { storage } from '../lib/storage.js';
 import { NameInput, ItemTags, priceText, shareLabelOf, MAX_PRICE } from './ui.jsx';
-import ItemStatusChip from './ItemStatusChip.jsx';
 import ItemEditDialog from './ItemEditDialog.jsx';
 import ShareSelect from './ShareSelect.jsx';
-import { canEditItemBasics } from '../lib/orderStatus.js';
 
 /**
  * 加點清單每一列的本機識別碼。
@@ -59,7 +59,7 @@ const toPayload = (items) =>
     sharedWith: item.sharedWith ?? [],
   }));
 
-export default function OrderTab({ joinCode, group, menu, orders = [], myOrder, canManage, onSaved }) {
+export default function OrderTab({ joinCode, group, menu, orders = [], myOrder, onSaved }) {
   const existing = myOrder?.order ?? null;
 
   const accepting =
@@ -86,7 +86,6 @@ export default function OrderTab({ joinCode, group, menu, orders = [], myOrder, 
       existing={existing}
       editToken={myOrder.editToken}
       accepting={accepting}
-      canManage={canManage}
       onSaved={onSaved}
     />
   );
@@ -175,21 +174,26 @@ function RegisterCard({ joinCode, orders, onRegistered }) {
   );
 }
 
-function OrderEditor({ joinCode, menu, orders, existing, editToken, accepting, canManage, onSaved }) {
+/**
+ * 點餐頁只做一件事：挑東西。
+ *
+ * 已經送出的品項不在這裡——那份資料跟別人點的東西是同一份，看與改一律去「清單」。
+ * 分兩個 tab 顯示同一張單，只會讓人為了確認自己點了什麼一直切回來。
+ *
+ * 購物車出現兩次是刻意的：上面那份給「剛挑完、還沒往下滑」的人，
+ * 置底那份收合著，給已經滑到菜單深處、想確認一下再送出的人。
+ */
+function OrderEditor({ joinCode, menu, orders, existing, editToken, accepting, onSaved }) {
   const [cart, setCart] = useState([]);
   const [note, setNote] = useState(existing.note ?? '');
   const [keyword, setKeyword] = useState('');
   const [editing, setEditing] = useState(null);
   const [renaming, setRenaming] = useState(false);
-  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [expanded, setExpanded] = useState(false);
   const [error, setError] = useState('');
   const [saving, setSaving] = useState(false);
 
   const tokens = storage.tokensFor(joinCode, editToken);
-
-  // 跟店家點過的品項，本人就不能再改品名與數量了（撤單另計）。
-  // 發起人與管理者不受此限。
-  const basicsEditable = (item) => canEditItemBasics(item, canManage);
 
   // 分單只選得到已經登記的人，自己不列（自己必然要付）
   const otherPeople = useMemo(
@@ -217,6 +221,7 @@ function OrderEditor({ joinCode, menu, orders, existing, editToken, accepting, c
   const matchCount = categories.reduce((sum, [, items]) => sum + items.length, 0);
   const searching = keyword.trim().length > 0;
 
+  const cartCount = cart.reduce((sum, i) => sum + i.qty, 0);
   const cartTotal = cart.reduce((sum, item) => sum + item.unitPrice * item.qty, 0);
   const cartUncertain = cart.some((i) => i.priceUncertain);
   const noteChanged = (note.trim() || null) !== (existing.note ?? null);
@@ -274,32 +279,6 @@ function OrderEditor({ joinCode, menu, orders, existing, editToken, accepting, c
     );
   }
 
-  /** 已送出的品項改起來是直接打伺服器，改完重讀 */
-  async function withSaving(fn) {
-    setError('');
-    setSaving(true);
-    try {
-      await fn();
-      await onSaved();
-    } catch (err) {
-      setError(err.message);
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  const patchSavedItem = (item, patch) =>
-    withSaving(() => api.patchOrderItem(item.id, patch, tokens));
-
-  const removeSavedItem = (item) => withSaving(() => api.deleteOrderItem(item.id, tokens));
-
-  function changeSavedQty(item, delta) {
-    const qty = item.qty + delta;
-    if (qty < 1) return removeSavedItem(item);
-    if (qty > 99) return undefined;
-    return patchSavedItem(item, { qty });
-  }
-
   async function submit() {
     setError('');
     if (cart.length === 0 && !noteChanged) return setError('沒有要加點的東西');
@@ -313,6 +292,7 @@ function OrderEditor({ joinCode, menu, orders, existing, editToken, accepting, c
         await api.addOrderItems(existing.id, toPayload(cart), tokens);
       }
       setCart([]);
+      setExpanded(false);
       await onSaved();
     } catch (err) {
       setError(err.message);
@@ -321,14 +301,14 @@ function OrderEditor({ joinCode, menu, orders, existing, editToken, accepting, c
     }
   }
 
-  async function removeWholeOrder() {
-    setConfirmDelete(false);
-    await withSaving(async () => {
-      await api.deleteOrder(existing.id, tokens);
-      storage.clearMyOrder(joinCode);
-      setCart([]);
-    });
-  }
+  const cartList = (
+    <CartList
+      cart={cart}
+      onEdit={(item) => setEditing(item)}
+      onChangeQty={changeCartQty}
+      disabled={saving}
+    />
+  );
 
   return (
     <Box>
@@ -357,113 +337,23 @@ function OrderEditor({ joinCode, menu, orders, existing, editToken, accepting, c
               {priceText(existing.payable, existing.payablePriceUncertain)}
             </Typography>
           )}
+          <Typography variant="caption" color="text.disabled" sx={{ display: 'block', mt: 0.5 }}>
+            已經送出的品項在「清單」那一頁看與修改。
+          </Typography>
         </Card>
 
-        <Box>
-          <Typography variant="overline" color="text.secondary">
-            我的單
-          </Typography>
-          <Card sx={{ mt: 0.5 }}>
-            <List disablePadding>
-              {existing.items.map((item) => (
-                <ListItem key={item.id} divider sx={{ px: 1.5, py: 1 }}>
-                  <Box sx={{ flex: 1, minWidth: 0 }}>
-                    <Typography
-                      variant="body2"
-                      noWrap
-                      sx={{ textDecoration: item.counted ? 'none' : 'line-through' }}
-                    >
-                      {item.name}
-                      <ItemTags
-                        isCustom={item.isCustom}
-                        priceUncertain={item.priceUncertain}
-                        shareLabel={shareLabelOf(item)}
-                      />
-                    </Typography>
-                    {item.note && (
-                      <Typography variant="caption" color="text.secondary" display="block" noWrap>
-                        {item.note}
-                      </Typography>
-                    )}
-                    <Stack direction="row" alignItems="center" spacing={0.75} sx={{ mt: 0.25 }}>
-                      <ItemStatusChip item={item} onChanged={onSaved} onError={setError} />
-                      <Typography variant="caption" color="text.secondary" className="tnum">
-                        {priceText(item.subtotal, item.priceUncertain)}
-                      </Typography>
-                    </Stack>
-                    {item.shared && (
-                      <Typography variant="caption" color="text.disabled" display="block" noWrap>
-                        {item.payers.map((p) => `${p.personName} ${p.amount}`).join('、')}
-                      </Typography>
-                    )}
-                  </Box>
-
-                  {accepting && (
-                    <>
-                      <IconButton
-                        size="small"
-                        onClick={() => setEditing({ mode: 'saved', item })}
-                        disabled={saving}
-                        aria-label={`修改 ${item.name}`}
-                        sx={{ color: 'text.disabled' }}
-                      >
-                        <EditIcon fontSize="small" />
-                      </IconButton>
-                      {basicsEditable(item) && (
-                        <IconButton
-                          size="small"
-                          onClick={() => changeSavedQty(item, -1)}
-                          disabled={saving}
-                          aria-label="減少"
-                        >
-                          <RemoveIcon fontSize="small" />
-                        </IconButton>
-                      )}
-                    </>
-                  )}
-                  <Typography variant="body2" className="tnum" sx={{ width: 24, textAlign: 'center' }}>
-                    ×{item.qty}
-                  </Typography>
-                  {accepting && basicsEditable(item) && (
-                    <IconButton
-                      size="small"
-                      onClick={() => changeSavedQty(item, 1)}
-                      disabled={saving}
-                      aria-label="增加"
-                    >
-                      <AddIcon fontSize="small" />
-                    </IconButton>
-                  )}
-                </ListItem>
-              ))}
-            </List>
-
-            {existing.items.length === 0 && (
-              <Typography variant="body2" color="text.disabled" align="center" sx={{ py: 2.5 }}>
-                還沒點東西，在下面挑幾樣
-              </Typography>
-            )}
-          </Card>
-
-          <Stack direction="row" alignItems="center" sx={{ mt: 0.75 }}>
-            <Typography variant="caption" color="text.disabled" sx={{ flex: 1 }}>
-              狀態每一樣分開算，誰都可以幫忙按
+        {/* 還沒送出的東西。空的時候整塊不出現——沒挑東西時它只是一個空殼 */}
+        {cart.length > 0 && (
+          <Box>
+            <Typography variant="overline" color="text.secondary">
+              這次要加點的
             </Typography>
-            {/* 已經跟店家點過的東西不能被整張帶走，那是撤單要做的事 */}
-            {(canManage || existing.items.every(basicsEditable)) && (
-              <Button size="small" color="error" onClick={() => setConfirmDelete(true)} disabled={saving}>
-                刪除整張單
-              </Button>
-            )}
-          </Stack>
-
-          {!canManage && existing.items.some((item) => !basicsEditable(item)) && (
-            <Typography variant="caption" color="text.disabled" sx={{ display: 'block', mt: 0.5 }}>
-              已經跟店家點過的品項，品名與數量就固定了——要多點請在下面另外加一筆，
-              不要了就把狀態改成待撤單。價格與備註仍然可以補。
+            <Card sx={{ mt: 0.5 }}>{cartList}</Card>
+            <Typography variant="caption" color="text.disabled" sx={{ display: 'block', mt: 0.75 }}>
+              價格、品名、備註或要分給誰，都點鉛筆改；改完記得按下面的加點。
             </Typography>
-          )}
-        </Box>
+          </Box>
+        )}
 
         {!accepting && (
           <Alert severity="info">已結束點餐，不能再加點。餐點狀態還是可以繼續更新。</Alert>
@@ -471,15 +361,6 @@ function OrderEditor({ joinCode, menu, orders, existing, editToken, accepting, c
 
         {accepting && (
           <>
-            <TextField
-              label="整張單的備註"
-              value={note}
-              onChange={(e) => setNote(e.target.value)}
-              placeholder="例如 我晚點到，餐先冰著"
-              helperText="單樣東西的要求（不要香菜之類）請用該列的鉛筆填"
-              slotProps={{ htmlInput: { maxLength: 200 } }}
-            />
-
             <Stack spacing={1.5}>
               <TextField
                 value={keyword}
@@ -558,76 +439,6 @@ function OrderEditor({ joinCode, menu, orders, existing, editToken, accepting, c
                   : '這家店還沒有菜單，用上面的「自己填一個」把品項加進來'}
               </Typography>
             )}
-
-            {cart.length > 0 && (
-              <Box>
-                <Typography variant="overline" color="text.secondary">
-                  這次要加點的
-                </Typography>
-                <Card sx={{ mt: 0.5 }}>
-                  <List disablePadding>
-                    {cart.map((item, index) => (
-                      <ListItem
-                        key={item.uid}
-                        divider={index < cart.length - 1}
-                        sx={{ px: 1.5, py: 0.75 }}
-                      >
-                        <Box sx={{ flex: 1, minWidth: 0 }}>
-                          <Typography variant="body2" noWrap>
-                            {item.name}
-                            <ItemTags
-                              isCustom={item.menuItemId == null}
-                              priceUncertain={item.priceUncertain}
-                              shareLabel={shareLabelOf(item)}
-                            />
-                          </Typography>
-                          {item.note && (
-                            <Typography variant="caption" color="text.secondary" display="block" noWrap>
-                              {item.note}
-                            </Typography>
-                          )}
-                          <Typography variant="caption" color="text.secondary" className="tnum">
-                            {priceText(item.unitPrice, item.priceUncertain)}
-                          </Typography>
-                        </Box>
-                        <IconButton
-                          size="small"
-                          onClick={() => setEditing({ mode: 'cart', item })}
-                          aria-label={`修改 ${item.name}`}
-                          sx={{ color: 'text.disabled' }}
-                        >
-                          <EditIcon fontSize="small" />
-                        </IconButton>
-                        <IconButton
-                          size="small"
-                          onClick={() => changeCartQty(item.uid, -1)}
-                          aria-label="減少"
-                        >
-                          <RemoveIcon fontSize="small" />
-                        </IconButton>
-                        <Typography
-                          variant="body2"
-                          className="tnum"
-                          sx={{ width: 24, textAlign: 'center' }}
-                        >
-                          {item.qty}
-                        </Typography>
-                        <IconButton
-                          size="small"
-                          onClick={() => changeCartQty(item.uid, 1)}
-                          aria-label="增加"
-                        >
-                          <AddIcon fontSize="small" />
-                        </IconButton>
-                      </ListItem>
-                    ))}
-                  </List>
-                </Card>
-                <Typography variant="caption" color="text.disabled" sx={{ display: 'block', mt: 0.75 }}>
-                  價格、品名、備註或要分給誰，都點鉛筆改；改完記得按下面的加點。
-                </Typography>
-              </Box>
-            )}
           </>
         )}
 
@@ -635,13 +446,11 @@ function OrderEditor({ joinCode, menu, orders, existing, editToken, accepting, c
       </Stack>
 
       <ItemEditDialog
-        item={editing?.item ?? null}
+        item={editing}
         people={otherPeople}
-        lockBasics={editing?.mode === 'saved' && !basicsEditable(editing.item)}
         onClose={() => setEditing(null)}
         onSave={(patch) => {
-          if (editing.mode === 'cart') editCartItem(editing.item.uid, patch);
-          else patchSavedItem(editing.item, patch);
+          editCartItem(editing.uid, patch);
           setEditing(null);
         }}
       />
@@ -653,29 +462,19 @@ function OrderEditor({ joinCode, menu, orders, existing, editToken, accepting, c
         onClose={() => setRenaming(false)}
         onSave={async (personName) => {
           setRenaming(false);
-          await withSaving(async () => {
+          setSaving(true);
+          try {
             await api.patchOrder(existing.id, { personName }, tokens);
             storage.renameMe(joinCode, personName);
             storage.rememberName(personName);
-          });
+            await onSaved();
+          } catch (err) {
+            setError(err.message);
+          } finally {
+            setSaving(false);
+          }
         }}
       />
-
-      <Dialog open={confirmDelete} onClose={() => setConfirmDelete(false)}>
-        <DialogTitle>刪除整張單？</DialogTitle>
-        <DialogContent>
-          <DialogContentText>
-            連同已經點過、已到餐的品項一起消失，也會從別人的分單裡移除，無法復原。
-            只想拿掉其中幾樣的話，用每一列的減號。
-          </DialogContentText>
-        </DialogContent>
-        <DialogActions>
-          <Button onClick={() => setConfirmDelete(false)}>取消</Button>
-          <Button color="error" variant="contained" onClick={removeWholeOrder}>
-            確定刪除
-          </Button>
-        </DialogActions>
-      </Dialog>
 
       {accepting && (
         <Paper
@@ -686,23 +485,71 @@ function OrderEditor({ joinCode, menu, orders, existing, editToken, accepting, c
             bottom: 0,
             borderTop: 1,
             borderColor: 'divider',
-            px: 2,
-            pt: 1.5,
-            pb: 'max(12px, env(safe-area-inset-bottom))',
             bgcolor: 'rgba(255,255,255,0.95)',
             backdropFilter: 'blur(8px)',
+            pb: 'max(12px, env(safe-area-inset-bottom))',
           }}
         >
-          <Stack direction="row" alignItems="center" spacing={1.5}>
-            <Box sx={{ flex: 1 }}>
-              <Typography variant="caption" color="text.secondary">
-                這次加點 {cart.reduce((sum, i) => sum + i.qty, 0)} 樣
-                {cartUncertain && '・含估價'}
-              </Typography>
-              <Typography variant="h6" className="tnum">
-                {priceText(cartTotal, cartUncertain)}
-              </Typography>
+          {/* 收合起來的快速檢視：滑到菜單深處時不必捲回最上面才確認得了 */}
+          <Collapse in={expanded}>
+            {/* 不透明底色：置底面板浮在菜單上面，半透明會讓兩層字疊在一起 */}
+            <Box
+              sx={{
+                maxHeight: '45dvh',
+                overflowY: 'auto',
+                bgcolor: 'background.paper',
+                borderBottom: 1,
+                borderColor: 'divider',
+              }}
+            >
+              {cart.length > 0 ? (
+                cartList
+              ) : (
+                <Typography variant="body2" color="text.disabled" align="center" sx={{ py: 2 }}>
+                  還沒挑任何東西
+                </Typography>
+              )}
+              <Box sx={{ px: 2, py: 1.5 }}>
+                <TextField
+                  label="整張單的備註"
+                  value={note}
+                  onChange={(e) => setNote(e.target.value)}
+                  placeholder="例如 我晚點到，餐先冰著"
+                  size="small"
+                  helperText="整張單的通則；單樣的要求請用該列的鉛筆填"
+                  slotProps={{ htmlInput: { maxLength: 200 } }}
+                />
+              </Box>
             </Box>
+          </Collapse>
+
+          <Stack direction="row" alignItems="center" spacing={1.5} sx={{ px: 2, pt: 1.5 }}>
+            <ButtonBase
+              onClick={() => setExpanded((v) => !v)}
+              aria-expanded={expanded}
+              aria-label={expanded ? '收合這次要加點的' : '展開這次要加點的'}
+              sx={{ flex: 1, justifyContent: 'flex-start', borderRadius: 2, px: 0.5, py: 0.5 }}
+            >
+              <ExpandLessIcon
+                fontSize="small"
+                sx={{
+                  color: 'text.secondary',
+                  mr: 0.5,
+                  transition: 'transform 0.2s',
+                  transform: expanded ? 'rotate(180deg)' : 'none',
+                }}
+              />
+              <Box sx={{ textAlign: 'left', minWidth: 0 }}>
+                <Typography variant="caption" color="text.secondary" component="p">
+                  這次加點 {cartCount} 樣
+                  {cartUncertain && '・含估價'}
+                  {noteChanged && '・備註已改'}
+                </Typography>
+                <Typography variant="h6" className="tnum">
+                  {priceText(cartTotal, cartUncertain)}
+                </Typography>
+              </Box>
+            </ButtonBase>
             <Button
               variant="contained"
               onClick={submit}
@@ -715,6 +562,68 @@ function OrderEditor({ joinCode, menu, orders, existing, editToken, accepting, c
         </Paper>
       )}
     </Box>
+  );
+}
+
+/**
+ * 還沒送出的加點清單。
+ * 上方那份與置底收合的那份是同一個元件——兩邊要做的事完全一樣，
+ * 分成兩份實作只會讓其中一份先長歪。
+ */
+function CartList({ cart, onEdit, onChangeQty, disabled }) {
+  return (
+    <List disablePadding>
+      {cart.map((item, index) => (
+        <ListItem key={item.uid} divider={index < cart.length - 1} sx={{ px: 1.5, py: 0.75 }}>
+          <Box sx={{ flex: 1, minWidth: 0 }}>
+            <Typography variant="body2" noWrap>
+              {item.name}
+              <ItemTags
+                isCustom={item.menuItemId == null}
+                priceUncertain={item.priceUncertain}
+                shareLabel={shareLabelOf(item)}
+              />
+            </Typography>
+            {item.note && (
+              <Typography variant="caption" color="text.secondary" display="block" noWrap>
+                {item.note}
+              </Typography>
+            )}
+            <Typography variant="caption" color="text.secondary" className="tnum">
+              {priceText(item.unitPrice, item.priceUncertain)}
+            </Typography>
+          </Box>
+          <IconButton
+            size="small"
+            onClick={() => onEdit(item)}
+            disabled={disabled}
+            aria-label={`修改 ${item.name}`}
+            sx={{ color: 'text.disabled' }}
+          >
+            <EditIcon fontSize="small" />
+          </IconButton>
+          <IconButton
+            size="small"
+            onClick={() => onChangeQty(item.uid, -1)}
+            disabled={disabled}
+            aria-label="減少"
+          >
+            <RemoveIcon fontSize="small" />
+          </IconButton>
+          <Typography variant="body2" className="tnum" sx={{ width: 24, textAlign: 'center' }}>
+            {item.qty}
+          </Typography>
+          <IconButton
+            size="small"
+            onClick={() => onChangeQty(item.uid, 1)}
+            disabled={disabled}
+            aria-label="增加"
+          >
+            <AddIcon fontSize="small" />
+          </IconButton>
+        </ListItem>
+      ))}
+    </List>
   );
 }
 

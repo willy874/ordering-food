@@ -80,7 +80,7 @@ erDiagram
         uuid   group_order_id FK
         text   person_name "登記的暱稱，本團唯一"
         uuid   edit_token "本人憑證"
-        boolean is_manager "被指派的管理者"
+        text   role "participant／manager／admin"
         int    total "自己點的金額，排除已撤單品項"
         text   note "整張單的通則"
     }
@@ -144,8 +144,9 @@ create table orders (
   person_name    text not null,
   note           text,
   edit_token     uuid not null default gen_random_uuid(),
-  -- 發起人指派的管理者：用自己的 edit_token 就能代改全團的單
-  is_manager     boolean not null default false,
+  -- 被指派的角色：participant／manager／admin，用自己的 edit_token 行使
+  role           text not null default 'participant'
+    check (role in ('participant', 'manager', 'admin')),
   total          int  not null default 0 check (total >= 0),
   created_at     timestamptz not null default now(),
   updated_at     timestamptz not null default now()
@@ -202,31 +203,41 @@ create index idx_shares_order      on order_item_shares (order_id);
 
 **完全不做帳號系統。** 團購的價值在於零阻力，要求註冊會直接殺掉使用率。
 
-改用四種憑證：
+改用四種憑證，對應三個角色：
 
-| 憑證 | 誰持有 | 能做什麼 | 存在哪 |
+| 憑證 | 誰持有 | 對應角色 | 存在哪 |
 |---|---|---|---|
 | `join_code` | 團裡所有人 | 看團、看所有人的訂單、登記暱稱、**改任何品項的狀態** | URL |
-| `edit_token` | 下單本人 | 加點、修改／刪除自己那筆訂單的內容，**但只動得了「未點單」的品名與數量** | localStorage |
-| `manage_code` | 發起人給出去的人 | 代改任何人的單一品項、代刪、批次改狀態，不受截止時間與品項狀態限制 | localStorage |
-| `admin_token` | 開團者 | 管理者的一切，**再加上**關團、改截止時間、刪團、指派管理者 | localStorage |
+| `edit_token` | 下單本人 | 那張單的 `orders.role`，預設 `participant` | localStorage |
+| `manage_code` | 發起人給出去的人 | `manager` | localStorage |
+| `admin_token` | 開團者 | `admin`，且是唯一刪得掉整攤的人 | localStorage |
 
-伺服器端以 HTTP header 驗證（`X-Edit-Token`、`X-Manage-Code`、`X-Admin-Token`），判定集中在 `lib/auth.js` 的 `resolveActor`。前端的按鈕顯示與否只是體驗，**權限判斷一律在後端**。
+| 角色 | 能做什麼 |
+|---|---|
+| `participant` 參與者 | 加點、改自己那張單，**但只動得了「未點單」的品名與數量**；受截止時間限制 |
+| `manager` 協助管理者 | 代改代刪**任何人**的訂單與品項、批次改狀態，不受截止時間與品項狀態限制 |
+| `admin` 最高管理者 | 再加上指派別人的角色、關攤／重新開放、改截止時間、刪攤 |
 
-**為什麼要有「管理者」這一層。** 原本只有發起人與本人兩種身分，但發起人自己也在吃飯——收拾殘局（補價、改備註、把菜挪去分帳、跟店家點完後推進度）常常是坐在他旁邊那個人在做。把 `admin_token` 給出去可以解決，代價是那個人連刪團都做得到，而且 uuid 沒辦法用嘴巴念。
+伺服器端以 HTTP header 驗證（`X-Edit-Token`、`X-Manage-Code`、`X-Admin-Token`），判定集中在 `lib/auth.js` 的 `resolveActor`，多個憑證同時存在時取最高的角色。前端的按鈕顯示與否只是體驗，**權限判斷一律在後端**。
 
-管理者因此有兩條來源，刻意等價：
+**為什麼要有中間這一層。** 原本只有發起人與本人兩種身分，但發起人自己也在吃飯——收拾殘局（補價、改備註、把菜挪去分帳、跟店家點完後推進度）常常是坐在他旁邊那個人在做。把 `admin_token` 給出去可以解決，代價是那組 uuid 沒辦法用嘴巴念，而且一旦給了就收不回來——它不是一個「設定」，是一把鑰匙。
+
+管理權因此有兩條來源，刻意等價：
 
 ```
-manage_code           8 碼，開團時產生，只有發起人看得到。念給誰，誰就是管理者。
-                      不必事先登記，所以「幫忙結帳但自己沒點東西」的人也能用。
-orders.is_manager     發起人在清單頁直接勾選某個已登記的參與者。
-                      那個人用自己原本的 edit_token 就有權限，不必再傳一次代碼。
+manage_code    8 碼，開攤時產生，只有發起人看得到。念給誰，誰就是協助管理者。
+               不必事先登記，所以「幫忙結帳但自己沒點東西」的人也能用。
+orders.role    最高管理者在清單頁直接指派某個已登記的參與者。
+               那個人用自己原本的 edit_token 就有權限，不必再傳一次代碼。
 ```
 
-分界線在「這一攤的生死」：關團、改截止、刪團、指派管理者只有發起人做得到。管理者只能代表發起人處理訂單，收得回來（把開關關掉即可），也給得出去。
+**最高管理者可以再指派最高管理者**，這是刻意的：發起人不會整晚盯著手機等別人來要權限。代價是他也可以把別人降回參與者，但發起人的 `admin_token` 不在 `orders` 這張表裡，永遠收得回來。
 
-`manage_code` 一律連同 `join_code` 一起驗證，因此不需要全域唯一。已知取捨：代碼給出去就收不回來（除非整團重開），要能收回權限請改用逐一指派。
+反過來，持 `manage_code` 的人只是協助管理者，**指派不了任何人**——代碼給出去就收不回來，能拿它再生出更多管理者的話就再也收束不了了。同理，被指派的 `admin` 也拿不到 `manage_code`：角色撤得掉，代碼撤不掉。
+
+`manage_code` 一律連同 `join_code` 一起驗證，因此不需要全域唯一。
+
+**發起人的權力全部指派得出去，包含刪攤**：指派最高管理者就是把「跟我同級」這件事講明了，硬留一項給發起人反而讓「最高」名不副實。安全感來自另一個地方——發起人的 `admin_token` 不在 `orders` 表裡，被指派的人再怎麼互相降權都動不到他，他永遠收得回來。
 
 **點過的東西，本人就不能再改品名與數量。** 品項一旦離開「未點單」，店家那邊已經記下了品名與數量，本人再改只會讓 App 上的清單與店家手上的單對不起來——真正該做的是跟店家重講一次，所以介面把他導向「另外加點一筆」或「撤單」。同理，已點單的品項本人也不能直接刪除（會繞過這條規則，而且撤單才留得下紀錄），整張單裡只要有一樣已點單就不能整張刪掉。
 
@@ -267,6 +278,7 @@ POST   /api/stores                          新增店家
 DELETE /api/stores/:id                      軟刪除店家
 GET    /api/stores/:id/menu                 取得店家菜單（含下架品項）
 POST   /api/stores/:id/menu                 新增菜單品項
+POST   /api/stores/:id/menu/bulk            一次匯入整份菜單（整批成立或退回）
 PATCH  /api/menu-items/:id                  修改／上下架
 DELETE /api/menu-items/:id                  刪除品項
 
@@ -276,8 +288,8 @@ GET    /api/groups?storeId=&title=          查同名收單中的團
 GET    /api/groups/:joinCode                團資訊 + 菜單 + 所有訂單 + 彙總
                                             （帶憑證才回 group.manageCode）
 POST   /api/groups/:joinCode/manage-code    驗證管理代碼
-PATCH  /api/groups/:joinCode                關團／改截止時間   [X-Admin-Token]
-DELETE /api/groups/:joinCode                刪團（cascade）    [X-Admin-Token]
+PATCH  /api/groups/:joinCode                關攤／改截止時間   [最高管理者]
+DELETE /api/groups/:joinCode                刪攤（cascade）    [最高管理者]
 PATCH  /api/groups/:joinCode/orders/status  批次改品項狀態     [管理者以上]
 
 # 個人訂單
@@ -286,7 +298,7 @@ POST   /api/groups/:joinCode/orders         登記暱稱／送出訂單 → { or
 PATCH  /api/orders/:orderId                 改暱稱／備註        [本人或管理者以上]
 POST   /api/orders/:orderId/items           加點（追加品項）    [本人或管理者以上]
 DELETE /api/orders/:orderId                 刪除整張單          [本人或管理者以上]
-PATCH  /api/orders/:orderId/manager         指派／取消管理者    [X-Admin-Token]
+PATCH  /api/orders/:orderId/role            指派角色           [最高管理者]
 
 # 單一品項
 PATCH  /api/order-items/:itemId             改數量／品名／價格／備註／分單
@@ -296,7 +308,7 @@ PATCH  /api/order-items/:itemId/status      改品項狀態          （不需�
 PATCH  /api/orders/:orderId/status          整張單一次改狀態    （不需憑證）
 ```
 
-「管理者以上」＝ `X-Manage-Code`、被指派者的 `X-Edit-Token`，或 `X-Admin-Token`。本人動已點單的品項時，品名與數量會被擋下（見 §5）。
+「管理者以上」＝ `manager` 或 `admin`；「最高管理者」＝ `admin`。參與者動已點單的品項時，品名與數量會被擋下（見 §5）。
 
 **沒有「整筆覆蓋」的改單 API。** 覆蓋會把已經跟店家點過、甚至已經到餐的品項連同狀態一起洗掉，所以改單拆成三個各自獨立的動作：加點只追加、改內容只動一列、刪除只刪一列。這也是「已經送單後還能繼續點」能成立的前提。
 
@@ -360,6 +372,8 @@ client/src/
 ├── lib/api.js                   fetch 封裝，錯誤帶 HTTP status
 ├── lib/storage.js               localStorage：憑證、名字、參與過的團
 ├── lib/orderStatus.js           狀態顯示設定（轉移規則與後端一致）＋ 品項可改與否
+├── lib/roles.js                 角色顯示設定（與後端 auth.js 一致）
+├── lib/menuCsv.js               菜單 CSV 解析與範本
 ├── pages/
 │   ├── Home.jsx                 開團／加入／最近參與的（會自動校正已刪除的）
 │   ├── NewGroup.jsx
@@ -367,12 +381,14 @@ client/src/
 │   └── Stores.jsx
 └── components/
     ├── ui.jsx                   Layout／Header／金額顯示等共用零件
-    ├── OrderTab.jsx             登記暱稱 ＋ 我的單（逐項狀態）＋ 菜單 ＋ 加點清單
+    ├── OrderTab.jsx             登記暱稱 ＋ 菜單 ＋ 加點清單（置底可收合）
     ├── ItemStatusChip.jsx       單一品項的狀態，點一下就能改
     ├── ItemEditDialog.jsx       改品名／價格／數量／備註／分單（加點清單與已送出共用）
     ├── ShareSelect.jsx          這一樣誰要付：我自己／全部平分／指定的人
-    ├── GroupManage.jsx          清單頁最上面：進度＋批次、參與者權限、管理代碼
-    ├── PeopleList.jsx           所有人的訂單；狀態誰都能改，內容需憑證
+    ├── MenuCsvImport.jsx        貼上 CSV 批次匯入菜單，含範本複製／下載
+    ├── GroupManage.jsx          清單頁最上面：進度明細＋批次、參與者權限（管理者限定）
+    ├── ManageCodeCard.jsx       清單頁最底下：顯示或輸入管理代碼
+    ├── PeopleList.jsx           所有人的訂單，自己置頂；狀態誰都能改，內容需憑證
     └── Summary.jsx              叫餐清單 ＋ 這一輪 ＋ 分帳 ＋ 分單一覽
 
 server/
@@ -383,7 +399,11 @@ server/
 └── migrations/000*.sql
 ```
 
-**進度為什麼在「清單」而不是「結帳」。** 想知道「這一輪還有誰沒點到」的時機，就是在看誰點了什麼的當下——兩者是同一件事，隔一個 tab 只會讓人來回切。結帳頁留給金額。
+**菜單為什麼要能貼 CSV。** 新開一家店最花時間的不是填店名，是後面那幾十樣品項，而那份菜單通常已經以某種表格形式存在了（照片打的、上次的試算表、店家給的清單）。解析放在**前端**：貼上之後要先看得到「這 23 樣會進去、第 5 行有問題」才敢按下去，錯誤得指到第幾行；後端因此只收乾淨的陣列，而且整批寫在一個 transaction 裡——有一列不合法就整批退回，不會留下匯入到一半的菜單讓人不知道從哪裡接。
+
+**進度為什麼在「清單」而不是「結帳」。** 想知道「這一輪還有誰沒點到」的時機，就是在看誰點了什麼的當下——兩者是同一件事，隔一個 tab 只會讓人來回切。結帳頁留給金額。進度只給管理者看：一般參與者只想知道自己點了什麼、多少錢，全攤的統計對他是雜訊，批次按鈕更不該出現在他面前。它也不只給數字——要跟店家開口的人得知道那三樣「未點單」到底是什麼、誰點的。
+
+**「我的單」為什麼不在點餐頁。** 點餐頁真正的工作是挑東西；挑完送出的結果跟別人送出的結果是同一份資料，分在兩個 tab 只會讓人為了確認自己點了什麼一直切回去。已送出的品項因此一律在清單頁看與改，自己那張置頂。點餐頁只留購物車，而且出現兩次：上面那份給剛挑完的人，置底收合的那份給已經滑到菜單深處、想確認一下再送出的人。
 
 **狀態歸屬**：購物車在送出前只存在前端（localStorage 草稿）；`editToken` / `adminToken` 存 localStorage；其餘一切以資料庫為唯一真實來源。
 
@@ -457,9 +477,11 @@ Neon 建議使用 **pooled connection**（連線字串含 `-pooler`），因為 
 |---|---|---|
 | 無帳號系統 | 知道團號即可看全團訂單 | 辦公室情境接受；團號不可猜 |
 | `edit_token` 存 localStorage | 換手機或清快取後改不了自己的單 | 開團者持 `admin_token` 可代改代刪 |
-| `manage_code` 給出去收不回來 | 拿到的人一直是管理者，直到整團結束 | 要能收回請改用逐一指派（清單頁的開關） |
+| `manage_code` 給出去收不回來 | 拿到的人一直是協助管理者，直到整攤結束 | 要能收回請改用逐一指派（清單頁的權限下拉） |
 | 管理代碼可被暴力猜 | 有團號的人可以一直試 | 8 碼 ÷ 31 字元 ≈ 8.5×10¹¹ 種；目前**沒有速率限制**，多實例部署下也不好做，接受 |
 | 管理者的操作沒有紀錄 | 不知道是誰改了誰的單 | 與品項狀態同樣的取捨；聚會情境接受 |
+| 最高管理者可以互相降權 | 被指派的兩個人可以把對方降回參與者 | 發起人的 `admin_token` 不在 `orders` 表裡，永遠收得回來 |
+| 沒有自動更新 | 別人剛加的東西要重讀才看得到 | 頁首給了一顆重新整理；輪詢見 ROADMAP |
 | 自填價格無法驗證 | 打錯價格會影響對帳 | 彙總頁把自填品項標示出來，讓大家核對 |
 | 截止時間 | 只擋前端等於沒擋 | 伺服器端在送單時檢查 `status` 與 `deadline_at` |
 | 重複送單 | 連點兩次產生兩筆 | 送出後停用按鈕；同團同暱稱由唯一索引擋下並要求區隔 |

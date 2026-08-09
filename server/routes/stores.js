@@ -1,8 +1,14 @@
 import { Router } from 'express';
-import { query } from '../db.js';
+import { query, withTransaction } from '../db.js';
 import { wrap, notFound } from '../lib/errors.js';
 import { toStore, toMenuItem } from '../lib/serialize.js';
-import { parse, createStoreSchema, createMenuItemSchema, patchMenuItemSchema } from '../lib/validate.js';
+import {
+  parse,
+  createStoreSchema,
+  createMenuItemSchema,
+  bulkMenuItemsSchema,
+  patchMenuItemSchema,
+} from '../lib/validate.js';
 
 const router = Router();
 
@@ -73,6 +79,56 @@ router.post(
       ],
     );
     res.status(201).json(toMenuItem(rows[0]));
+  }),
+);
+
+/**
+ * 一次匯入整份菜單。
+ *
+ * 換一家店時逐樣新增要按幾十次，而菜單通常已經以某種表格形式存在（照片打的、
+ * 上次的試算表、店家給的清單）。整批進來就整批成立：一個 transaction，
+ * 有一列不合法就整批退回，不會留下匯入到一半的菜單讓人不知道要從哪裡接。
+ *
+ * 沒有「先清空再匯入」的選項——那會把既有品項連同歷史訂單的參照一起刪掉
+ * （menu_item_id 變 null）。要重來請先手動下架或刪除。
+ */
+router.post(
+  '/stores/:id/menu/bulk',
+  wrap(async (req, res) => {
+    const input = parse(bulkMenuItemsSchema, req.body);
+
+    const created = await withTransaction(async (client) => {
+      const store = await client.query('select 1 from stores where id = $1', [req.params.id]);
+      if (!store.rowCount) throw notFound('找不到店家');
+
+      const { rows: countRows } = await client.query(
+        'select count(*)::int as n from menu_items where store_id = $1',
+        [req.params.id],
+      );
+      const base = countRows[0].n * 10;
+
+      const rows = [];
+      for (const [index, item] of input.items.entries()) {
+        const { rows: inserted } = await client.query(
+          `insert into menu_items (store_id, name, price, category, sort_order, price_uncertain)
+           values ($1, $2, $3, $4, $5, $6) returning *`,
+          [
+            req.params.id,
+            item.name,
+            item.price,
+            item.category || '主餐',
+            // 沒指定排序就照 CSV 的順序接在既有品項後面，
+            // 貼上來的順序通常就是菜單上的順序
+            item.sortOrder ?? base + index * 10,
+            item.priceUncertain === true,
+          ],
+        );
+        rows.push(inserted[0]);
+      }
+      return rows;
+    });
+
+    res.status(201).json({ created: created.length, items: created.map(toMenuItem) });
   }),
 );
 

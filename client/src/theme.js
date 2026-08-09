@@ -31,6 +31,8 @@ const theme = createTheme({
         },
         // 金額欄位對齊用
         '.tnum': { fontVariantNumeric: 'tabular-nums' },
+        // 重新整理圖示轉圈用
+        '@keyframes spin': { from: { transform: 'rotate(0deg)' }, to: { transform: 'rotate(360deg)' } },
       },
     },
     MuiButton: {

@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { badRequest } from './errors.js';
 import { ORDER_STATUSES } from './orderStatus.js';
+import { ROLES } from './auth.js';
 
 const name = z.string().trim().min(1, '名稱不可為空').max(50, '名稱過長');
 // 上限放到 20 萬：酒吧的整支酒與套餐（例如香檳王一支 18,000）會超過四位數，
@@ -120,9 +121,9 @@ export const manageCodeSchema = z.object({
     .pipe(z.string().min(4, '請輸入完整的管理代碼').max(16, '管理代碼過長')),
 });
 
-/** 發起人指派／取消某個參與者的管理權 */
-export const patchOrderManagerSchema = z.object({
-  isManager: z.boolean(),
+/** 最高管理者指派某個參與者的角色 */
+export const patchOrderRoleSchema = z.object({
+  role: z.enum(ROLES),
 });
 
 /** 發起人批次改狀態，例如跟店家點完後把整桌標成「已點單」 */
@@ -143,6 +144,18 @@ export const createMenuItemSchema = z.object({
   category: z.string().trim().max(20).optional(),
   sortOrder: z.number().int().optional(),
   priceUncertain: z.boolean().optional(),
+});
+
+/**
+ * 一次匯入整份菜單。
+ *
+ * CSV 的解析在前端做——貼上之後要先看得到「這 23 樣會進去、這 2 行有問題」
+ * 才敢按下去，錯誤要指到第幾行。後端收到的因此已經是乾淨的陣列。
+ *
+ * 300 的上限是防呆：一家店的菜單不會比這更長，超過通常是貼錯東西。
+ */
+export const bulkMenuItemsSchema = z.object({
+  items: z.array(createMenuItemSchema).min(1, '至少要有一個品項').max(300, '一次最多 300 個品項'),
 });
 
 export const patchMenuItemSchema = z.object({

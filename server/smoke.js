@@ -802,7 +802,7 @@ check(
 
 // ── 管理代碼與管理者 ──────────────────────────────────────────
 //
-// 管理者能改任何人的單、批次推進度，但關團、刪團與指派管理者仍然只有發起人做得到。
+// 協助管理者能改任何人的單、批次推進度，但關攤、刪攤與指派角色要最高管理者才行。
 console.log('\n管理代碼與管理者');
 const mgGroup = await call('/groups', {
   method: 'POST',
@@ -877,68 +877,233 @@ check(
     .status === 200,
 );
 check(
-  '但管理者不能關團',
+  '協助管理者不能關攤',
   (await call(`/groups/${mgCode}`, { method: 'PATCH', headers: mgManage, body: { status: 'closed' } }))
     .status === 403,
 );
 check(
-  '管理者也不能刪團',
+  '協助管理者也不能刪攤',
   (await call(`/groups/${mgCode}`, { method: 'DELETE', headers: mgManage })).status === 403,
 );
-
-// 指派特定參與者當管理者：他用自己原本的 editToken 就有權限
-const mgHelperEdit = { 'X-Edit-Token': mgHelper.data.editToken };
 check(
-  '還沒被指派前，改不動別人的單',
-  (await call(`/order-items/${mgVictimItem.id}`, { method: 'PATCH', headers: mgHelperEdit, body: { qty: 4 } }))
-    .status === 403,
-);
-check(
-  '不是發起人不能指派管理者',
+  '持管理代碼的人指派不了任何人（代碼收不回來，不能再生管理者）',
   (
-    await call(`/orders/${mgHelper.data.orderId}/manager`, {
+    await call(`/orders/${mgHelper.data.orderId}/role`, {
       method: 'PATCH',
       headers: mgManage,
-      body: { isManager: true },
+      body: { role: 'manager' },
     })
   ).status === 403,
 );
 
-const mgGrant = await call(`/orders/${mgHelper.data.orderId}/manager`, {
+// ── 指派角色 ──────────────────────────────────────────────────
+console.log('\n指派角色');
+const mgHelperEdit = { 'X-Edit-Token': mgHelper.data.editToken };
+const mgVictimEdit = { 'X-Edit-Token': mgVictim.data.editToken };
+
+check('新登記的人預設是參與者', (await call(`/groups/${mgCode}`)).data.orders.every((o) => o.role === 'participant'));
+check(
+  '參與者改不動別人的單',
+  (await call(`/order-items/${mgVictimItem.id}`, { method: 'PATCH', headers: mgHelperEdit, body: { qty: 4 } }))
+    .status === 403,
+);
+
+const mgGrant = await call(`/orders/${mgHelper.data.orderId}/role`, {
   method: 'PATCH',
   headers: mgAdmin,
-  body: { isManager: true },
+  body: { role: 'manager' },
 });
-check('發起人可以指派管理者', mgGrant.status === 200 && mgGrant.data.isManager === true);
+check('發起人可以指派協助管理者', mgGrant.status === 200 && mgGrant.data.role === 'manager');
 check(
-  '被指派後清單看得出誰是管理者',
-  (await call(`/groups/${mgCode}`)).data.orders.find((o) => o.personName === '幫忙的人')
-    ?.isManager === true,
+  '清單看得出誰是什麼角色',
+  (await call(`/groups/${mgCode}`)).data.orders.find((o) => o.personName === '幫忙的人')?.role ===
+    'manager',
 );
 check(
-  '被指派的人用自己的 editToken 就能改別人的單',
+  '協助管理者用自己的 editToken 就能改別人的單',
   (await call(`/order-items/${mgVictimItem.id}`, { method: 'PATCH', headers: mgHelperEdit, body: { qty: 4 } }))
     .status === 200,
 );
 check(
-  '但他仍然不能刪團',
-  (await call(`/groups/${mgCode}`, { method: 'DELETE', headers: mgHelperEdit })).status === 403,
+  '但協助管理者指派不了別人',
+  (
+    await call(`/orders/${mgVictim.data.orderId}/role`, {
+      method: 'PATCH',
+      headers: mgHelperEdit,
+      body: { role: 'manager' },
+    })
+  ).status === 403,
 );
-
-await call(`/orders/${mgHelper.data.orderId}/manager`, {
-  method: 'PATCH',
-  headers: mgAdmin,
-  body: { isManager: false },
-});
 check(
-  '收回管理權後就改不動別人的單了',
-  (await call(`/order-items/${mgVictimItem.id}`, { method: 'PATCH', headers: mgHelperEdit, body: { qty: 2 } }))
+  '協助管理者也關不了攤',
+  (await call(`/groups/${mgCode}`, { method: 'PATCH', headers: mgHelperEdit, body: { status: 'closed' } }))
     .status === 403,
 );
 
+// 升成最高管理者
+await call(`/orders/${mgHelper.data.orderId}/role`, {
+  method: 'PATCH',
+  headers: mgAdmin,
+  body: { role: 'admin' },
+});
+check(
+  '最高管理者可以指派別人',
+  (
+    await call(`/orders/${mgVictim.data.orderId}/role`, {
+      method: 'PATCH',
+      headers: mgHelperEdit,
+      body: { role: 'manager' },
+    })
+  ).status === 200,
+);
+check(
+  '最高管理者可以關攤與重新開放',
+  (await call(`/groups/${mgCode}`, { method: 'PATCH', headers: mgHelperEdit, body: { status: 'closed' } }))
+    .status === 200 &&
+    (await call(`/groups/${mgCode}`, { method: 'PATCH', headers: mgHelperEdit, body: { status: 'open' } }))
+      .status === 200,
+);
+check(
+  '但最高管理者拿不到管理代碼（角色收得回來，代碼收不回來）',
+  (await call(`/groups/${mgCode}`, { headers: mgHelperEdit })).data.group.manageCode === undefined,
+);
+
+// 降回參與者
+await call(`/orders/${mgHelper.data.orderId}/role`, {
+  method: 'PATCH',
+  headers: mgAdmin,
+  body: { role: 'participant' },
+});
+check(
+  '降回參與者後就改不動別人的單了',
+  (await call(`/order-items/${mgVictimItem.id}`, { method: 'PATCH', headers: mgHelperEdit, body: { qty: 2 } }))
+    .status === 403,
+);
+check(
+  '也不能再指派任何人',
+  (
+    await call(`/orders/${mgVictim.data.orderId}/role`, {
+      method: 'PATCH',
+      headers: mgHelperEdit,
+      body: { role: 'admin' },
+    })
+  ).status === 403,
+);
+check(
+  '亂寫的角色會被擋下',
+  (
+    await call(`/orders/${mgHelper.data.orderId}/role`, {
+      method: 'PATCH',
+      headers: mgAdmin,
+      body: { role: 'superuser' },
+    })
+  ).status === 400,
+);
+check(
+  '被指派過的人仍可正常改自己的單',
+  (await call(`/orders/${mgHelper.data.orderId}`, { method: 'PATCH', headers: mgHelperEdit, body: { note: '我還在' } }))
+    .status === 200,
+);
 check(
   '管理代碼不會出現在沒帶憑證的完整快照裡',
   !JSON.stringify(await call(`/groups/${mgCode}`)).includes(mgGroup.data.manageCode),
+);
+// mgVictimEdit 用來確認參與者的界線沒被角色系統放寬
+check(
+  '參與者仍然改得動自己的單',
+  (await call(`/orders/${mgVictim.data.orderId}`, { method: 'PATCH', headers: mgVictimEdit, body: { note: '我的備註' } }))
+    .status === 200,
+);
+
+// 刪攤：最高管理者做得到，協助管理者不行。另開一攤，免得刪掉上面還在用的那個
+const delGroup = await call('/groups', {
+  method: 'POST',
+  body: { storeId: store.data.id, title: '[smoke] 刪攤權限團', hostName: '小明' },
+});
+const delCode = delGroup.data.joinCode;
+const delAdmin = { 'X-Admin-Token': delGroup.data.adminToken };
+const delHelper = await call(`/groups/${delCode}/orders`, {
+  method: 'POST',
+  body: { personName: '副手', items: [{ menuItemId: bento.data.id, qty: 1 }] },
+});
+const delHelperEdit = { 'X-Edit-Token': delHelper.data.editToken };
+
+await call(`/orders/${delHelper.data.orderId}/role`, {
+  method: 'PATCH',
+  headers: delAdmin,
+  body: { role: 'manager' },
+});
+check(
+  '協助管理者刪不掉整攤',
+  (await call(`/groups/${delCode}`, { method: 'DELETE', headers: delHelperEdit })).status === 403,
+);
+
+await call(`/orders/${delHelper.data.orderId}/role`, {
+  method: 'PATCH',
+  headers: delAdmin,
+  body: { role: 'admin' },
+});
+check(
+  '最高管理者可以刪掉整攤',
+  (await call(`/groups/${delCode}`, { method: 'DELETE', headers: delHelperEdit })).status === 204,
+);
+check('刪掉之後就查不到了', (await call(`/groups/${delCode}`)).status === 404);
+
+// ── 菜單批次匯入 ──────────────────────────────────────────────
+console.log('\n菜單批次匯入');
+const csvStore = await call('/stores', { method: 'POST', body: { name: '[smoke] 匯入店' } });
+const bulkOkResult = await call(`/stores/${csvStore.data.id}/menu/bulk`, {
+  method: 'POST',
+  body: {
+    items: [
+      { name: '匯入的排骨飯', price: 90, category: '便當' },
+      { name: '匯入的雞腿飯', price: 100, category: '便當' },
+      { name: '匯入的湯', price: 0, priceUncertain: true },
+    ],
+  },
+});
+check('可以一次匯入多個品項', bulkOkResult.status === 201 && bulkOkResult.data.created === 3,
+  `status=${bulkOkResult.status}`);
+
+const csvMenu = await call(`/stores/${csvStore.data.id}/menu`);
+check('匯入的品項讀得到', csvMenu.data.length === 3, `n=${csvMenu.data.length}`);
+check(
+  '沒給分類的落到預設值「主餐」',
+  csvMenu.data.find((i) => i.name === '匯入的湯')?.category === '主餐',
+);
+check('價格待確認有帶進去', csvMenu.data.find((i) => i.name === '匯入的湯')?.priceUncertain === true);
+check(
+  '沒給排序時照送出的順序遞增',
+  (() => {
+    const a = csvMenu.data.find((i) => i.name === '匯入的排骨飯');
+    const b = csvMenu.data.find((i) => i.name === '匯入的雞腿飯');
+    return a.sortOrder < b.sortOrder;
+  })(),
+);
+
+const bulkBad = await call(`/stores/${csvStore.data.id}/menu/bulk`, {
+  method: 'POST',
+  body: { items: [{ name: '好的', price: 50 }, { name: '壞的', price: -1 }] },
+});
+check('有一列不合法就整批退回', bulkBad.status === 400, `status=${bulkBad.status}`);
+check(
+  '退回後真的沒有寫進去（transaction）',
+  (await call(`/stores/${csvStore.data.id}/menu`)).data.length === 3,
+);
+
+check(
+  '空陣列會被擋下',
+  (await call(`/stores/${csvStore.data.id}/menu/bulk`, { method: 'POST', body: { items: [] } }))
+    .status === 400,
+);
+check(
+  '匯入到不存在的店家回 404',
+  (
+    await call('/stores/999999999/menu/bulk', {
+      method: 'POST',
+      body: { items: [{ name: '孤兒品項', price: 10 }] },
+    })
+  ).status === 404,
 );
 
 // ── 收尾 ──────────────────────────────────────────────────────

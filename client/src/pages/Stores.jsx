@@ -11,6 +11,7 @@ import {
   IconButton,
   List,
   ListItem,
+  Snackbar,
   Stack,
   TextField,
   Typography,
@@ -23,12 +24,15 @@ import DialogActions from '@mui/material/DialogActions';
 import DialogContent from '@mui/material/DialogContent';
 import DialogTitle from '@mui/material/DialogTitle';
 import { api } from '../lib/api.js';
+import { parseMenuCsv } from '../lib/menuCsv.js';
 import { Layout, Header, Empty, ItemTags, money, MAX_PRICE } from '../components/ui.jsx';
+import MenuCsvImport from '../components/MenuCsvImport.jsx';
 
 export default function Stores() {
   const [stores, setStores] = useState(null);
   const [selected, setSelected] = useState(null);
   const [error, setError] = useState('');
+  const [toast, setToast] = useState('');
 
   async function loadStores() {
     try {
@@ -79,15 +83,33 @@ export default function Stores() {
           </Stack>
         )}
 
-        <NewStoreForm onCreated={loadStores} />
+        <NewStoreForm onCreated={loadStores} onToast={setToast} />
       </Stack>
+
+      <Snackbar
+        open={Boolean(toast)}
+        autoHideDuration={4000}
+        onClose={() => setToast('')}
+        message={toast}
+        anchorOrigin={{ vertical: 'bottom', horizontal: 'center' }}
+      />
     </Layout>
   );
 }
 
-function NewStoreForm({ onCreated }) {
+/**
+ * 新增店家，順便把整份菜單一起帶進來。
+ *
+ * 新開一家店最花時間的從來不是填店名，是後面那幾十樣品項。所以 CSV 就放在
+ * 這一步：建店與匯入是同一個動作，不必建完再翻進去一樣一樣按。
+ *
+ * 匯入失敗不會把店一起收回——店已經建好了是事實，讓使用者進菜單頁重試比
+ * 「什麼都沒發生」好，至少他知道自己走到哪一步。
+ */
+function NewStoreForm({ onCreated, onToast }) {
   const [name, setName] = useState('');
   const [phone, setPhone] = useState('');
+  const [csv, setCsv] = useState('');
   const [error, setError] = useState('');
   const [saving, setSaving] = useState(false);
 
@@ -96,9 +118,21 @@ function NewStoreForm({ onCreated }) {
     setError('');
     setSaving(true);
     try {
-      await api.createStore({ name: name.trim(), phone: phone.trim() || null });
+      const store = await api.createStore({ name: name.trim(), phone: phone.trim() || null });
+
+      const { items } = parseMenuCsv(csv);
+      if (items.length > 0) {
+        try {
+          const result = await api.bulkAddMenuItems(store.id, items);
+          onToast?.(`已建立「${store.name}」並匯入 ${result.created} 樣`);
+        } catch (err) {
+          setError(`店家已建立，但菜單匯入失敗：${err.message}。可以進去菜單頁再試一次。`);
+        }
+      }
+
       setName('');
       setPhone('');
+      setCsv('');
       await onCreated();
     } catch (err) {
       setError(err.message);
@@ -106,6 +140,8 @@ function NewStoreForm({ onCreated }) {
       setSaving(false);
     }
   }
+
+  const pendingCount = parseMenuCsv(csv).items.length;
 
   return (
     <Card component="form" onSubmit={submit} sx={{ p: 2, borderStyle: 'dashed' }}>
@@ -115,9 +151,12 @@ function NewStoreForm({ onCreated }) {
         </Typography>
         <TextField label="店名" value={name} onChange={(e) => setName(e.target.value)} slotProps={{ htmlInput: { maxLength: 50 } }} />
         <TextField label="電話（選填）" value={phone} onChange={(e) => setPhone(e.target.value)} slotProps={{ htmlInput: { maxLength: 30 } }} />
+
+        <MenuCsvImport value={csv} onChange={setCsv} onToast={onToast} />
+
         {error && <Alert severity="error">{error}</Alert>}
         <Button type="submit" variant="contained" disabled={saving || !name.trim()}>
-          {saving ? '新增中…' : '新增店家'}
+          {saving ? '新增中…' : pendingCount > 0 ? `新增店家並匯入 ${pendingCount} 樣` : '新增店家'}
         </Button>
       </Stack>
     </Card>
@@ -133,6 +172,7 @@ function MenuEditor({ store, onBack }) {
   const [editing, setEditing] = useState(null);
   const [error, setError] = useState('');
   const [saving, setSaving] = useState(false);
+  const [toast, setToast] = useState('');
 
   async function load() {
     try {
@@ -282,7 +322,35 @@ function MenuEditor({ store, onBack }) {
             </Button>
           </Stack>
         </Card>
+
+        {/* 同一個匯入器：換季改整份菜單時，這裡比一樣一樣按快得多 */}
+        <MenuCsvImport
+          title="一次貼上多個品項"
+          busy={saving}
+          onToast={setToast}
+          onImport={async (items) => {
+            setError('');
+            setSaving(true);
+            try {
+              const result = await api.bulkAddMenuItems(store.id, items);
+              setToast(`已匯入 ${result.created} 樣`);
+              await load();
+            } catch (err) {
+              setError(err.message);
+            } finally {
+              setSaving(false);
+            }
+          }}
+        />
       </Stack>
+
+      <Snackbar
+        open={Boolean(toast)}
+        autoHideDuration={4000}
+        onClose={() => setToast('')}
+        message={toast}
+        anchorOrigin={{ vertical: 'bottom', horizontal: 'center' }}
+      />
 
       <MenuItemEditDialog
         item={editing}

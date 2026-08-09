@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { query, withTransaction } from '../db.js';
 import { wrap, notFound, badRequest, unauthorized, conflict, isUniqueViolation } from '../lib/errors.js';
 import { generateUniqueJoinCode, generateManageCode } from '../lib/codes.js';
-import { assertCanManage, assertIsHost, canSeeManageCode } from '../lib/auth.js';
+import { assertCanManage, assertCanGrant, canSeeManageCode } from '../lib/auth.js';
 import {
   resolveItems,
   insertOrderItems,
@@ -47,7 +47,7 @@ async function loadGroup(client, joinCode) {
 async function loadOrders(client, groupId) {
   const runner = client ?? { query };
   const { rows } = await runner.query(
-    `select o.id, o.person_name, o.note, o.created_at, o.is_manager,
+    `select o.id, o.person_name, o.note, o.created_at, o.role,
             coalesce(
               json_agg(
                 json_build_object(
@@ -79,8 +79,8 @@ async function loadOrders(client, groupId) {
       personName: row.person_name,
       note: row.note,
       createdAt: row.created_at,
-      // 誰是管理者是團內公開資訊：大家要知道找誰改單，而且知道團號本來就看得到全團
-      isManager: row.is_manager === true,
+      // 角色是團內公開資訊：大家要知道找誰改單，而且知道團號本來就看得到全團
+      role: row.role,
       items: row.items.map(toOrderItem),
     }),
   );
@@ -239,8 +239,9 @@ router.patch(
     const input = parse(patchGroupSchema, req.body);
     const group = await loadGroup(null, req.params.joinCode);
 
-    // 關團與截止時間是發起人的事，管理者不行——管理者管的是訂單，不是這一攤的生死
-    assertIsHost(req, group, '只有開團的人可以修改這個團');
+    // 關攤與截止時間是最高管理者的事：發起人自己可能正在跟店家講話，
+    // 但協助管理者只管訂單，動不了這一攤的節奏
+    await assertCanGrant({ query }, req, group, '只有最高管理者可以修改這個團');
 
     const sets = [];
     const params = [];
@@ -261,7 +262,9 @@ router.patch(
     );
 
     const updated = await loadGroup(null, req.params.joinCode);
-    res.json(toGroup(updated, { manageCode: true }));
+    // 被指派的最高管理者也能關攤，但不該因此拿到管理代碼——
+    // 那是一把收不回來的鑰匙，角色卻是隨時可以撤掉的
+    res.json(toGroup(updated, { manageCode: canSeeManageCode(req, updated) }));
   }),
 );
 
@@ -281,7 +284,7 @@ router.patch(
       { query },
       req,
       group,
-      '只有發起人與管理者可以批次修改狀態',
+      '只有管理者以上可以批次修改狀態',
     );
 
     // 批次的對象是品項：「跟店家點完了」要標的是這一輪還沒點的那些東西，
@@ -335,7 +338,9 @@ router.delete(
   wrap(async (req, res) => {
     const group = await loadGroup(null, req.params.joinCode);
 
-    assertIsHost(req, group, '只有開團的人可以刪除這個團');
+    // 刪攤會連同所有人的單一起消失，所以要求最高管理者——
+    // 發起人指派出去的人與他同級，代表他刪掉一攤重開是合理的
+    await assertCanGrant({ query }, req, group, '只有最高管理者可以刪除這個團');
 
     // orders 與 order_items 皆為 on delete cascade，會一併移除
     await query('delete from group_orders where id = $1', [group.id]);

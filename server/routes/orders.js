@@ -14,13 +14,13 @@ import {
   addOrderItemsSchema,
   patchOrderSchema,
   patchOrderItemSchema,
-  patchOrderManagerSchema,
+  patchOrderRoleSchema,
   orderStatusSchema,
   MAX_ITEMS_PER_ORDER,
 } from '../lib/validate.js';
 import { canTransition, STATUS_LABELS } from '../lib/orderStatus.js';
 import { toOrderItem } from '../lib/serialize.js';
-import { UUID_RE, resolveActor } from '../lib/auth.js';
+import { UUID_RE, resolveActor, assertCanGrant } from '../lib/auth.js';
 
 const router = Router();
 
@@ -29,7 +29,7 @@ async function loadOrder(client, orderId) {
 
   const runner = client ?? { query };
   const { rows } = await runner.query(
-    `select o.id, o.person_name, o.edit_token, o.group_order_id, o.is_manager,
+    `select o.id, o.person_name, o.edit_token, o.group_order_id, o.role,
             g.status as group_status, g.deadline_at, g.store_id,
             g.admin_token, g.manage_code
        from orders o
@@ -415,26 +415,33 @@ router.delete(
 );
 
 /**
- * 指派／取消管理者，發起人限定。
+ * 指派角色，最高管理者限定。
  *
- * 被指派的人用他自己原本的 edit_token 就有管理權，不必再收一次代碼——
+ * 被指派的人用他自己原本的 edit_token 就有權限，不必再收一次代碼——
  * 現場把手機遞來遞去輸代碼比講一句「你幫我管一下」麻煩得多。
  *
- * 刻意不讓管理者再指派管理者：權力只從發起人流出，收得回來。
+ * 最高管理者可以再指派最高管理者，這是刻意的：發起人不會整晚盯著手機等別人
+ * 來要權限。代價是他也可以把別人降回參與者，但發起人手上的 admin_token
+ * 不在這張表裡，永遠收得回來。
+ *
+ * 持管理代碼的人只是協助管理者，指派不了任何人——代碼給出去收不回來，
+ * 能拿它再生出更多管理者的話就再也收束不了了。
  */
 router.patch(
-  '/orders/:orderId/manager',
+  '/orders/:orderId/role',
   wrap(async (req, res) => {
-    const input = parse(patchOrderManagerSchema, req.body);
+    const input = parse(patchOrderRoleSchema, req.body);
     const order = await loadOrder(null, req.params.orderId);
 
-    const token = req.get('X-Admin-Token');
-    if (!token || token !== order.admin_token) {
-      throw unauthorized('只有發起的人可以指派管理者');
-    }
+    await assertCanGrant(
+      { query },
+      req,
+      { id: order.group_order_id, admin_token: order.admin_token, manage_code: order.manage_code },
+      '只有最高管理者可以指派權限',
+    );
 
-    await query('update orders set is_manager = $1 where id = $2', [input.isManager, order.id]);
-    res.json({ orderId: order.id, personName: order.person_name, isManager: input.isManager });
+    await query('update orders set role = $1 where id = $2', [input.role, order.id]);
+    res.json({ orderId: order.id, personName: order.person_name, role: input.role });
   }),
 );
 

@@ -19,12 +19,15 @@ import {
 } from '@mui/material';
 import ContentCopyIcon from '@mui/icons-material/ContentCopy';
 import IosShareIcon from '@mui/icons-material/IosShare';
+import RefreshIcon from '@mui/icons-material/Refresh';
 import { api } from '../lib/api.js';
 import { storage } from '../lib/storage.js';
+import { roleAtLeast } from '../lib/roles.js';
 import { Layout, Header, Empty, money } from '../components/ui.jsx';
 import OrderTab from '../components/OrderTab.jsx';
 import PeopleList from '../components/PeopleList.jsx';
 import GroupManage from '../components/GroupManage.jsx';
+import ManageCodeCard from '../components/ManageCodeCard.jsx';
 import Summary from '../components/Summary.jsx';
 
 const TABS = [
@@ -55,6 +58,7 @@ export default function Group() {
   const [closing, setClosing] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
   const [toast, setToast] = useState('');
 
   const adminToken = storage.getAdminToken(code);
@@ -98,11 +102,29 @@ export default function Group() {
     load();
   }, [load]);
 
+  /**
+   * 手動重新整理。
+   * 大家坐在同一桌，別人剛剛加了什麼、餐到了沒有，都要重讀才看得到；
+   * 在還沒有輪詢之前，至少給一顆按得到的按鈕。
+   */
+  async function refresh() {
+    setRefreshing(true);
+    try {
+      await load();
+      setToast('已更新');
+    } finally {
+      setRefreshing(false);
+    }
+  }
+
   async function toggleStatus() {
-    if (!adminToken) return;
     setClosing(true);
     try {
-      await api.patchGroup(code, { status: data.group.status === 'open' ? 'closed' : 'open' }, adminToken);
+      await api.patchGroup(
+        code,
+        { status: data.group.status === 'open' ? 'closed' : 'open' },
+        { editToken: stored?.editToken, adminToken, manageCode },
+      );
       await load();
     } catch (err) {
       setError(err.message);
@@ -114,7 +136,7 @@ export default function Group() {
   async function removeGroup() {
     setDeleting(true);
     try {
-      await api.deleteGroup(code, adminToken);
+      await api.deleteGroup(code, { editToken: stored?.editToken, adminToken, manageCode });
       storage.forgetGroup(code);
       navigate('/', { replace: true });
     } catch (err) {
@@ -175,10 +197,18 @@ export default function Group() {
   const isClosed = group.status !== 'open';
   const deadline = deadlineLabel(group.deadlineAt);
 
-  // 管理權有三條來源：發起人、手上有管理代碼、或被發起人指派。
+  // 角色有三條來源，取最高的那個：發起人（恆為最高管理者）、手上的管理代碼
+  // （協助管理者），或被指派到這張單上的角色。
   // 這裡只決定按鈕顯不顯示，真正的把關在後端（server/lib/auth.js）。
   const isHost = Boolean(adminToken);
-  const canManage = isHost || Boolean(manageCode) || myOrderRecord?.isManager === true;
+  const grantedRole = myOrderRecord?.role ?? 'participant';
+  const myRole = isHost
+    ? 'admin'
+    : roleAtLeast(grantedRole, 'manager') || !manageCode
+      ? grantedRole
+      : 'manager';
+  const canManage = roleAtLeast(myRole, 'manager');
+  const canGrant = roleAtLeast(myRole, 'admin');
   const tokens = { editToken: stored?.editToken, adminToken, manageCode };
 
   return (
@@ -198,6 +228,17 @@ export default function Group() {
                 aria-label={`複製代碼 ${code}`}
                 sx={{ letterSpacing: '0.1em', fontWeight: 600 }}
               />
+              <IconButton
+                onClick={refresh}
+                disabled={refreshing}
+                aria-label="重新整理"
+                sx={{ color: 'text.secondary' }}
+              >
+                <RefreshIcon
+                  fontSize="small"
+                  sx={refreshing ? { animation: 'spin 0.8s linear infinite' } : undefined}
+                />
+              </IconButton>
               <IconButton onClick={share} aria-label="分享邀請連結" sx={{ color: 'text.secondary' }}>
                 <IosShareIcon fontSize="small" />
               </IconButton>
@@ -245,12 +286,12 @@ export default function Group() {
         <>
           <GroupManage
             joinCode={code}
-            group={group}
             orders={orders}
             summary={summary}
             tokens={tokens}
             isHost={isHost}
             canManage={canManage}
+            canGrant={canGrant}
             myOrderId={stored?.orderId}
             onChanged={load}
           />
@@ -259,6 +300,21 @@ export default function Group() {
             myOrderId={stored?.orderId}
             tokens={tokens}
             canManage={canManage}
+            accepting={!isClosed && !(group.deadlineAt && new Date(group.deadlineAt) < new Date())}
+            onChanged={load}
+            onOrderDeleted={() => {
+              storage.clearMyOrder(code);
+              setTab('order');
+            }}
+          />
+          {/* 置底：這是「還沒有權限的人」才需要的入口，擺在名單之後才不會擋路 */}
+          <ManageCodeCard
+            joinCode={code}
+            group={group}
+            isHost={isHost}
+            canManage={canManage}
+            myRole={myRole}
+            onToast={setToast}
             onChanged={load}
           />
         </>
@@ -267,7 +323,7 @@ export default function Group() {
       {tab === 'summary' && (
         <>
           <Summary group={group} summary={summary} orders={orders} />
-          {adminToken && (
+          {canGrant && (
             <Stack spacing={1.5} sx={{ px: 2, pb: 4 }}>
               <Button
                 variant={isClosed ? 'outlined' : 'contained'}
@@ -282,7 +338,7 @@ export default function Group() {
                 刪除這一攤
               </Button>
               <Typography variant="caption" color="text.disabled" align="center">
-                這區塊只有發起的人看得到
+                {isHost ? '這區塊只有發起的人看得到' : '這區塊只有最高管理者看得到'}
               </Typography>
             </Stack>
           )}

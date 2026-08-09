@@ -40,7 +40,8 @@ export const storage = {
 
   /**
    * 管理代碼。跟 adminToken 不同的是它是人念得出來的，發起人可以直接把它
-   * 給旁邊幫忙的人；持有者能代改全團訂單，但關團與刪團仍然只有發起人做得到。
+   * 給旁邊幫忙的人；持有者是協助管理者，能代改全攤訂單，
+   * 但關攤、刪攤與指派權限要最高管理者才行。
    */
   getManageCode: (code) => read(`manage:${code}`),
   setManageCode: (code, value) => write(`manage:${code}`, value),

@@ -35,16 +35,28 @@ URL=https://ordering-food-mu.vercel.app/api
 
 沒有帳號系統，改用四種憑證（判定集中在 `server/lib/auth.js` 的 `resolveActor`，前端只用來決定按鈕顯不顯示）：
 
-| 憑證 | 怎麼取得 | 放哪裡 | 能做什麼 |
+| 憑證 | 怎麼取得 | 放哪裡 | 對應角色 |
 |---|---|---|---|
-| `joinCode` | 開團回應，6 碼（`ABCDEFGHJKMNPQRSTUVWXYZ23456789`，排除易混淆字元） | URL path | 讀團、讀全團訂單與彙總、下新單 |
-| `editToken` | 下單回應，uuid | HTTP header `X-Edit-Token` | 改／刪「自己那一筆」訂單；**已點單的品項改不了品名與數量** |
-| `manageCode` | 開團回應，8 碼、同一套字母表 | HTTP header `X-Manage-Code` | 代改代刪任何訂單、批次改狀態，不受截止時間與品項狀態限制 |
-| `adminToken` | 開團回應，uuid | HTTP header `X-Admin-Token` | 管理者的一切，**再加上**關團、改截止、刪團、指派管理者 |
+| `joinCode` | 開團回應，6 碼（`ABCDEFGHJKMNPQRSTUVWXYZ23456789`，排除易混淆字元） | URL path | 誰都算——讀團、讀全團訂單與彙總、下新單、改品項狀態 |
+| `editToken` | 下單回應，uuid | HTTP header `X-Edit-Token` | 那張單的 `orders.role`，預設 `participant` |
+| `manageCode` | 開團回應，8 碼、同一套字母表 | HTTP header `X-Manage-Code` | `manager`（協助管理者） |
+| `adminToken` | 開團回應，uuid | HTTP header `X-Admin-Token` | `admin`（最高管理者），且是唯一刪得掉整攤的人 |
+
+三個角色，權力由小到大（定義在 `server/lib/auth.js`）：
+
+| 角色 | 能做什麼 |
+|---|---|
+| `participant` 參與者 | 只動得了自己那張單，**已離開 `pending` 的品項改不了品名與數量、也不能刪**；受截止時間限制 |
+| `manager` 協助管理者 | 代改代刪**任何人**的訂單與品項、批次改狀態，不受截止時間與品項狀態限制 |
+| `admin` 最高管理者 | 再加上 `PATCH /orders/:id/role`（指派別人的角色）、`PATCH /groups/:joinCode`（關攤／改截止）與 `DELETE /groups/:joinCode`（刪攤） |
+
+多個憑證同時帶時取最高的那個。發起人恆為 `admin`，而且他的 `adminToken` 不在 `orders` 表裡，所以任何被指派出去的權限他都收得回來。
 
 **兩個 token 都只在建立當下回傳一次**，之後任何查詢 API 都不會再吐出來（見 `server/lib/serialize.js` 的註解）。用程式操作時請自己存下來。`manageCode` 是唯一的例外：帶著 `X-Admin-Token`（或它自己）讀 `GET /groups/:joinCode` 就會回傳，因為發起人得看得到它才念得出去。
 
-**管理者有兩條等價的來源。** 除了 `X-Manage-Code`，發起人也可以用 `PATCH /orders/:orderId/manager` 把某個已登記的參與者標成管理者——那個人之後用他自己原本的 `X-Edit-Token` 就有全團的管理權。前者適合「幫忙結帳但沒點東西」的人，後者可以隨時收回。
+**管理權有兩條等價的來源。** 除了 `X-Manage-Code`，最高管理者也可以用 `PATCH /orders/:orderId/role` 指派某個已登記的參與者——那個人之後用他自己原本的 `X-Edit-Token` 就有權限。前者適合「幫忙結帳但沒點東西」的人，後者可以隨時收回，而且給得出 `admin`。
+
+持 `manageCode` 的人**指派不了任何人**（只有 `admin` 可以）：代碼給出去就收不回來，能拿它再生出更多管理者的話就再也收束不了了。同理，被指派的 `admin` 也拿不到 `manageCode`。
 
 `manageCode` 一律連同 `joinCode` 一起驗證，因此不必全域唯一；比對前會 trim 並轉大寫。**沒有速率限制**，靠的是 31⁸ ≈ 8.5×10¹¹ 的搜尋空間。
 
@@ -155,7 +167,7 @@ API 用 camelCase，DB 用 snake_case，轉換都在 `server/lib/serialize.js`�
 {
   "id": "b31c…",              // uuid
   "personName": "小明",        // 登記的暱稱，本團唯一
-  "isManager": false,          // 發起人指派的管理者，可代改全團的單
+  "role": "participant",       // participant / manager / admin，見 §2
   "note": "我晚點到",           // 整張單的通則
   "total": 400,                // 自己點的金額，排除已撤單品項
   "payable": 310,              // 實際要付多少（已含分單），收錢看這個
@@ -260,6 +272,30 @@ curl -s -X POST $URL/stores/1/menu -H 'Content-Type: application/json' -d '{
 
 `category` 省略 → `主餐`；`sortOrder` 省略 → 0；`priceUncertain` 省略 → false。店家不存在回 404。
 
+### `POST /stores/:id/menu/bulk` — 一次匯入整份菜單 → 201
+
+換一家店時逐樣 POST 要打幾十次，而菜單通常已經以某種表格形式存在。這一支吃一個陣列，格式與單筆新增完全相同。
+
+```bash
+curl -s -X POST $URL/stores/1/menu/bulk -H 'Content-Type: application/json' -d '{
+  "items": [
+    { "name": "滷肉飯", "price": 45, "category": "主食", "sortOrder": 10 },
+    { "name": "本日湯品", "price": 0, "priceUncertain": true }
+  ]
+}'
+```
+
+```jsonc
+{ "created": 2, "items": [ /* MenuItem[] */ ] }
+```
+
+- **整批成立或整批退回**：跑在一個 transaction 裡，有一列不合法就整批 400，不會留下匯入到一半的菜單。
+- 1–300 個品項，超過或空陣列都 400。店家不存在 404。
+- `sortOrder` 省略時**照陣列順序**接在既有品項後面（既有數量 × 10 起跳，每筆 +10），因為貼上來的順序通常就是菜單上的順序。
+- **只會新增，不會清空既有品項**。沒有「先清空再匯入」的選項——那會把既有品項連同歷史訂單的參照一起刪掉（`menu_item_id` 變 null）。
+
+前端的 CSV 貼上介面（`client/src/lib/menuCsv.js`）解析完之後就是打這一支。CSV 欄位為 `品名,價格,分類,排序,價格待確認`，解析放在前端是因為要先讓使用者看到「這 23 樣會進去、第 5 行有問題」才敢按下去。
+
 ### `PATCH /menu-items/:id` — 修改品項
 
 只送要改的欄位，可用：`name`、`price`、`category`、`available`、`sortOrder`、`priceUncertain`。
@@ -358,7 +394,7 @@ curl -s -X POST $URL/groups/K7M2QX/manage-code \
 
 不分大小寫、自動 trim。代碼不對回 403。
 
-### `PATCH /groups/:joinCode` — 關團／改截止 `[X-Admin-Token]`
+### `PATCH /groups/:joinCode` — 關攤／改截止 `[最高管理者]`
 
 ```bash
 # 關團
@@ -372,11 +408,13 @@ curl -s -X PATCH $URL/groups/K7M2QX \
   -d '{"deadlineAt":"2026-08-08T23:30:00+08:00"}'
 ```
 
-`status` 只能是 `open` / `closed`（可以再改回 `open` 重新收單）。兩個欄位都沒送回 400。回傳更新後的 Group。
+`status` 只能是 `open` / `closed`（可以再改回 `open` 重新收單）。兩個欄位都沒送回 400。回傳更新後的 Group——但只有帶 `X-Admin-Token`（或 `X-Manage-Code`）時才含 `manageCode`，被指派的最高管理者拿不到。
 
-### `DELETE /groups/:joinCode` — 刪團 `[X-Admin-Token]` → 204
+### `DELETE /groups/:joinCode` — 刪攤 `[最高管理者]` → 204
 
-`orders` 與 `order_items` 都是 cascade，會一併消失，**不可復原**。
+`orders` 與 `order_items` 都是 cascade，會一併消失，**不可復原**。`manager` 呼叫會 403。
+
+被指派的 `admin` 也刪得掉——指派最高管理者就是把「跟我同級」這件事講明了。權力交出去之前想清楚，這一項沒有回頭路。
 
 ---
 
@@ -465,19 +503,23 @@ curl -s -X POST $URL/orders/$ORDER_ID/items \
 - 一張單累積上限 60 個品項，超過 → 400。
 - 團關閉或逾期後不能加點（發起人與管理者也不行）——收單結束就是結束，要補點請重新開放。
 
-### `PATCH /orders/:orderId/manager` — 指派／取消管理者 `[X-Admin-Token]`
+### `PATCH /orders/:orderId/role` — 指派角色 `[最高管理者]`
 
 ```bash
-curl -s -X PATCH $URL/orders/$ORDER_ID/manager \
+curl -s -X PATCH $URL/orders/$ORDER_ID/role \
   -H 'Content-Type: application/json' -H "X-Admin-Token: $ADMIN" \
-  -d '{"isManager":true}'
+  -d '{"role":"manager"}'
 ```
 
 ```jsonc
-{ "orderId": "b31c…", "personName": "小華", "isManager": true }
+{ "orderId": "b31c…", "personName": "小華", "role": "manager" }
 ```
 
-被指派的人之後用他自己的 `X-Edit-Token` 就有全團管理權（改任何人的品項、批次改狀態），但**不能**關團、刪團或再指派別人——權力只從發起人流出，隨時可以用 `{"isManager":false}` 收回。管理者自己呼叫這一支會 403。
+`role` 只能是 `participant` / `manager` / `admin`，其他值 400。被指派的人之後用他自己的 `X-Edit-Token` 就有那個角色的權限。
+
+- **只有 `admin` 呼叫得動**，`manager` 與持 `manageCode` 的人一律 403。
+- `admin` 可以再指派 `admin`：發起人不會整晚盯著手機等別人來要權限。代價是他也可以把別人降回 `participant`，但發起人手上的 `adminToken` 不在這張表裡，永遠收得回來。
+- 送 `{"role":"participant"}` 就是收回權限。
 
 ### `PATCH /order-items/:itemId` — 改單一品項 `[本人或管理者以上]`
 
@@ -495,21 +537,21 @@ curl -s -X PATCH $URL/order-items/88 \
 - **只改 `qty`、`note` 或分單會保留與菜單的連結；一旦動到名稱或價格，這一列就轉成自填品項（`menuItemId` 變 null）**——菜單品項的名稱與價格一律以菜單為準，留著連結的話改的值會被蓋回去。
 - 判斷依據是**值有沒有變**，不是欄位有沒有送。整個表單原樣送回來（只改了備註）不會把品項踢出菜單。
 - 品項的 `status` 不會因為改內容而重設。
-- 本人受「團仍開著且未逾期」限制；**發起人與管理者不受限制**——改錯的價、補漏的備註、把某一樣挪去分帳，幾乎都發生在結束點餐之後。
+- 參與者受「團仍開著且未逾期」限制；**管理者以上不受限制**——改錯的價、補漏的備註、把某一樣挪去分帳，幾乎都發生在結束點餐之後。
 
 **品項離開 `pending` 之後，本人就不能再改 `name` 與 `qty`** → 400。店家那邊已經記下品名與數量了，App 這邊再改只會讓兩份單對不起來；要多點請 `POST /orders/:id/items` 另外加一筆，不要了請把狀態改成 `cancel_requested`。
 
-`unitPrice`、`priceUncertain`、`note`、`shareScope`、`sharedWith` **不在限制內**：自填品項常常是「先點了，結帳才知道多少錢」，分單也多半是結帳當下才喬。判斷依據同樣是值有沒有變，所以編輯表單把原本的品名數量原樣送回來不會被擋。發起人與管理者完全不受此限。
+`unitPrice`、`priceUncertain`、`note`、`shareScope`、`sharedWith` **不在限制內**：自填品項常常是「先點了，結帳才知道多少錢」，分單也多半是結帳當下才喬。判斷依據同樣是值有沒有變，所以編輯表單把原本的品名數量原樣送回來不會被擋。管理者以上完全不受此限。
 
 ### `DELETE /order-items/:itemId` — 刪掉其中一樣 `[本人或管理者以上]` → 204
 
-刪光一張單的所有品項不會連帶刪掉這張單，會留下一張空單（`counted: false`，不計入人數與金額）。本人受「團仍開著且未逾期」限制，發起人與管理者不受限制。
+刪光一張單的所有品項不會連帶刪掉這張單，會留下一張空單（`counted: false`，不計入人數與金額）。參與者受「團仍開著且未逾期」限制，管理者以上不受限制。
 
 **本人不能刪掉已經離開 `pending` 的品項** → 400，請改用撤單。否則「不能改品名數量」只要刪掉重加就繞過了，而且撤單才留得下紀錄。
 
 ### `DELETE /orders/:orderId` — 刪整張單 `[本人或管理者以上]` → 204
 
-本人受「團仍開著且未逾期」限制；**發起人與管理者不受限制**，關團後仍可代刪，因為收拾殘局通常發生在關團之後。
+參與者受「團仍開著且未逾期」限制；**管理者以上不受限制**，關攤後仍可代刪，因為收拾殘局通常發生在關攤之後。
 
 **單裡只要有一樣離開 `pending`，本人就不能整張刪掉** → 400（同上，避免繞過）。要退出請逐項撤單。
 
@@ -730,8 +772,10 @@ import('./server/db.js').then(async ({ pool }) => {
 | 兩個 token 只回一次 | 遺失就只能靠 `admin_token` 代操作；`admin_token` 遺失只能查資料庫的 `group_orders.admin_token`。`manageCode` 不同，帶 `X-Admin-Token` 讀團就拿得回來。 |
 | 本人改不動已點單的品名與數量 | 品項離開 `pending` 之後 `PATCH` 帶 `name` 或 `qty` 會 400，刪除也會 400。要改請帶管理者以上的憑證，或走撤單。 |
 | 已點單的品項仍可改價格 | 刻意的：自填品項常常是結帳才知道多少錢。只有品名與數量被鎖。 |
-| 管理者不能關團／刪團 | `X-Manage-Code` 對 `PATCH`/`DELETE /groups/:joinCode` 一律 403，那兩支只認 `X-Admin-Token`。 |
-| 管理代碼給出去收不回來 | 只能整團重開。要能收回請改用 `PATCH /orders/:orderId/manager` 逐一指派。 |
+| 協助管理者關不了攤 | `manager` 對 `PATCH /groups/:joinCode` 會 403，那一支要 `admin`。 |
+| 被指派的 admin 刪得掉整攤 | 指派最高管理者＝把「跟我同級」講明了，包含 `DELETE /groups/:joinCode`。 |
+| 指派角色只有 admin 做得到 | `manager` 與持 `manageCode` 的人呼叫 `PATCH /orders/:id/role` 一律 403。 |
+| 管理代碼給出去收不回來 | 只能整攤重開。要能收回請改用 `PATCH /orders/:orderId/role` 逐一指派。 |
 | 同團同名會 409 | `orders (group_order_id, person_name)` 有 unique index，因為彙總是按名字收錢的。 |
 | 90 秒內同店同團名同開團者不會開新團 | 回傳既有團並帶 `reused: true`。 |
 | 沒有整筆覆蓋的改單 API | 加點用 `POST /orders/:id/items`（只追加），改內容用 `PATCH /order-items/:id`（只動一列）。覆蓋會洗掉已到餐品項的狀態。 |
@@ -760,6 +804,7 @@ DELETE /api/stores/:id                      軟刪除店家（active = false）
 
 GET    /api/stores/:id/menu                 取得菜單（含下架品項）
 POST   /api/stores/:id/menu                 新增菜單品項
+POST   /api/stores/:id/menu/bulk            一次匯入整份菜單（整批成立或退回）
 PATCH  /api/menu-items/:id                  改名／改價／上下架／改分類／改排序
 DELETE /api/menu-items/:id                  硬刪除品項（會影響歷史訂單呈現）
 
@@ -769,8 +814,8 @@ GET    /api/groups?storeId=&title=          查同名收單中的團
 GET    /api/groups/:joinCode                團 + 菜單 + 所有訂單 + 彙總
                                             （帶憑證才回 group.manageCode）
 POST   /api/groups/:joinCode/manage-code    驗證管理代碼
-PATCH  /api/groups/:joinCode                關團／改截止              [X-Admin-Token]
-DELETE /api/groups/:joinCode                刪團（cascade）           [X-Admin-Token]
+PATCH  /api/groups/:joinCode                關攤／改截止              [最高管理者]
+DELETE /api/groups/:joinCode                刪攤（cascade）           [最高管理者]
 PATCH  /api/groups/:joinCode/orders/status  批次改品項狀態             [管理者以上]
 
 POST   /api/groups/:joinCode/orders         登記暱稱／下單（items 可為空）
@@ -778,7 +823,7 @@ POST   /api/groups/:joinCode/orders         登記暱稱／下單（items 可為
 PATCH  /api/orders/:orderId                 改暱稱／備註              [本人或管理者以上]
 POST   /api/orders/:orderId/items           加點（只追加）            [本人或管理者以上]
 DELETE /api/orders/:orderId                 刪整張單                  [本人或管理者以上]
-PATCH  /api/orders/:orderId/manager         指派／取消管理者           [X-Admin-Token]
+PATCH  /api/orders/:orderId/role           指派角色                  [最高管理者]
 
 PATCH  /api/order-items/:itemId             改數量／品名／價格／備註／分單
                                                                       [本人或管理者以上]
@@ -787,6 +832,6 @@ PATCH  /api/order-items/:itemId/status      改品項狀態          （不需�
 PATCH  /api/orders/:orderId/status          整張單一次改狀態    （不需憑證）
 ```
 
-「管理者以上」＝ `X-Manage-Code`、被指派者的 `X-Edit-Token`，或 `X-Admin-Token`。
+「管理者以上」＝ `manager` 或 `admin`；「最高管理者」＝ `admin`。角色來自 `X-Manage-Code`、被指派者的 `X-Edit-Token`，或 `X-Admin-Token`（恆為 `admin`），見 §2。
 
 驗證整條流程可跑 `npm run smoke`（需先啟動伺服器；測試資料以 `[smoke]` 開頭並自動清除）。

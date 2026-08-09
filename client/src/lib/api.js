@@ -39,6 +39,9 @@ export const api = {
 
   getMenu: (storeId) => request(`/stores/${storeId}/menu`),
   addMenuItem: (storeId, body) => request(`/stores/${storeId}/menu`, { method: 'POST', body }),
+  /** 一次匯入整份菜單，整批成立或整批退回 */
+  bulkAddMenuItems: (storeId, items) =>
+    request(`/stores/${storeId}/menu/bulk`, { method: 'POST', body: { items } }),
   patchMenuItem: (id, body) => request(`/menu-items/${id}`, { method: 'PATCH', body }),
   deleteMenuItem: (id) => request(`/menu-items/${id}`, { method: 'DELETE' }),
 
@@ -52,10 +55,12 @@ export const api = {
       method: 'POST',
       body: { manageCode },
     }),
-  patchGroup: (joinCode, body, adminToken) =>
-    request(`/groups/${encodeURIComponent(joinCode)}`, { method: 'PATCH', body, adminToken }),
-  deleteGroup: (joinCode, adminToken) =>
-    request(`/groups/${encodeURIComponent(joinCode)}`, { method: 'DELETE', adminToken }),
+  /** 關攤／改截止：最高管理者以上，所以要帶齊憑證而不只是 adminToken */
+  patchGroup: (joinCode, body, tokens) =>
+    request(`/groups/${encodeURIComponent(joinCode)}`, { method: 'PATCH', body, ...tokens }),
+  /** 刪攤：最高管理者以上 */
+  deleteGroup: (joinCode, tokens) =>
+    request(`/groups/${encodeURIComponent(joinCode)}`, { method: 'DELETE', ...tokens }),
   findSimilarGroups: (storeId, title) =>
     request(`/groups?storeId=${storeId}&title=${encodeURIComponent(title)}`),
 
@@ -72,9 +77,9 @@ export const api = {
   deleteOrderItem: (itemId, tokens) =>
     request(`/order-items/${itemId}`, { method: 'DELETE', ...tokens }),
   deleteOrder: (orderId, tokens) => request(`/orders/${orderId}`, { method: 'DELETE', ...tokens }),
-  /** 指派／取消管理者，只有發起人做得到 */
-  setOrderManager: (orderId, isManager, adminToken) =>
-    request(`/orders/${orderId}/manager`, { method: 'PATCH', body: { isManager }, adminToken }),
+  /** 指派角色，只有最高管理者做得到 */
+  setOrderRole: (orderId, role, tokens) =>
+    request(`/orders/${orderId}/role`, { method: 'PATCH', body: { role }, ...tokens }),
 
   // 狀態不需要憑證：現場誰看到餐送來誰就能按
   setItemStatus: (itemId, status) =>
