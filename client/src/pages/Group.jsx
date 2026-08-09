@@ -10,22 +10,26 @@ import {
   DialogContent,
   DialogContentText,
   DialogTitle,
+  IconButton,
   Snackbar,
   Stack,
   Tab,
   Tabs,
   Typography,
 } from '@mui/material';
+import ContentCopyIcon from '@mui/icons-material/ContentCopy';
+import IosShareIcon from '@mui/icons-material/IosShare';
 import { api } from '../lib/api.js';
 import { storage } from '../lib/storage.js';
 import { Layout, Header, Empty, money } from '../components/ui.jsx';
 import OrderTab from '../components/OrderTab.jsx';
 import PeopleList from '../components/PeopleList.jsx';
+import GroupManage from '../components/GroupManage.jsx';
 import Summary from '../components/Summary.jsx';
 
 const TABS = [
   ['order', '點餐'],
-  ['people', '大家點了什麼'],
+  ['people', '清單'],
   ['summary', '結帳'],
 ];
 
@@ -54,11 +58,24 @@ export default function Group() {
   const [toast, setToast] = useState('');
 
   const adminToken = storage.getAdminToken(code);
+  const manageCode = storage.getManageCode(code);
   const stored = storage.getMyOrder(code);
 
   const load = useCallback(async () => {
     try {
-      const result = await api.getGroup(code);
+      // 帶上手上的憑證：發起人才拿得到 group.manageCode
+      const result = await api.getGroup(code, {
+        adminToken: storage.getAdminToken(code) ?? undefined,
+        manageCode: storage.getManageCode(code) ?? undefined,
+      });
+
+      // 本機記著一張伺服器上已經不存在的單（發起人代刪、或整團重來），
+      // 留著只會讓點餐頁一直對著一個空殼。清掉就會回到登記暱稱那一步。
+      const mine = storage.getMyOrder(code);
+      if (mine && !result.orders.some((order) => order.id === mine.orderId)) {
+        storage.clearMyOrder(code);
+      }
+
       setData(result);
       setError('');
       storage.rememberGroup({
@@ -69,6 +86,9 @@ export default function Group() {
         status: result.group.status,
       });
     } catch (err) {
+      // 團已經被刪掉：順手把本機清單與憑證一起清乾淨，
+      // 否則首頁會一直留著一個點進來只會報錯的項目
+      if (err.status === 404) storage.forgetGroup(code);
       setError(err.message);
       setData(null);
     }
@@ -101,6 +121,16 @@ export default function Group() {
       setError(err.message);
       setDeleting(false);
       setConfirmDelete(false);
+    }
+  }
+
+  /** 代碼要用嘴巴唸給旁邊的人、或貼進聊天室，複製代碼本身比複製整段邀請常用 */
+  async function copyCode() {
+    try {
+      await navigator.clipboard.writeText(code);
+      setToast(`已複製代碼 ${code}`);
+    } catch {
+      setToast(`代碼 ${code}`);
     }
   }
 
@@ -145,6 +175,12 @@ export default function Group() {
   const isClosed = group.status !== 'open';
   const deadline = deadlineLabel(group.deadlineAt);
 
+  // 管理權有三條來源：發起人、手上有管理代碼、或被發起人指派。
+  // 這裡只決定按鈕顯不顯示，真正的把關在後端（server/lib/auth.js）。
+  const isHost = Boolean(adminToken);
+  const canManage = isHost || Boolean(manageCode) || myOrderRecord?.isManager === true;
+  const tokens = { editToken: stored?.editToken, adminToken, manageCode };
+
   return (
     <Layout
       header={
@@ -153,7 +189,19 @@ export default function Group() {
           subtitle={`${group.store.name}・${group.hostName} 發起`}
           back="/"
           right={
-            <Chip label={code} onClick={share} className="tnum" sx={{ letterSpacing: '0.1em', fontWeight: 600 }} />
+            <Stack direction="row" alignItems="center" spacing={0.5}>
+              <Chip
+                label={code}
+                onClick={copyCode}
+                icon={<ContentCopyIcon sx={{ fontSize: 14 }} />}
+                className="tnum"
+                aria-label={`複製代碼 ${code}`}
+                sx={{ letterSpacing: '0.1em', fontWeight: 600 }}
+              />
+              <IconButton onClick={share} aria-label="分享邀請連結" sx={{ color: 'text.secondary' }}>
+                <IosShareIcon fontSize="small" />
+              </IconButton>
+            </Stack>
           }
         >
           <Stack direction="row" alignItems="center" spacing={1} sx={{ px: 2, pb: 1 }}>
@@ -188,21 +236,37 @@ export default function Group() {
           menu={menu}
           orders={orders}
           myOrder={myOrderRecord ? { order: myOrderRecord, editToken: stored.editToken } : null}
+          canManage={canManage}
           onSaved={load}
         />
       )}
 
-      {tab === 'people' && <PeopleList orders={orders} myOrderId={stored?.orderId} />}
+      {tab === 'people' && (
+        <>
+          <GroupManage
+            joinCode={code}
+            group={group}
+            orders={orders}
+            summary={summary}
+            tokens={tokens}
+            isHost={isHost}
+            canManage={canManage}
+            myOrderId={stored?.orderId}
+            onChanged={load}
+          />
+          <PeopleList
+            orders={orders}
+            myOrderId={stored?.orderId}
+            tokens={tokens}
+            canManage={canManage}
+            onChanged={load}
+          />
+        </>
+      )}
 
       {tab === 'summary' && (
         <>
-          <Summary
-            group={group}
-            summary={summary}
-            joinCode={code}
-            adminToken={adminToken}
-            onChanged={load}
-          />
+          <Summary group={group} summary={summary} orders={orders} />
           {adminToken && (
             <Stack spacing={1.5} sx={{ px: 2, pb: 4 }}>
               <Button

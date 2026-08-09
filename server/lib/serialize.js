@@ -1,4 +1,5 @@
-import { ORDER_STATUSES, isCounted } from './orderStatus.js';
+import { ORDER_STATUSES, isCounted, rollupStatus } from './orderStatus.js';
+import { applySplits, buildSplitOverview } from './split.js';
 
 /**
  * DB row → API 回應。
@@ -33,10 +34,23 @@ export const toOrderItem = (row) => ({
   qty: row.qty,
   isCustom: row.is_custom,
   priceUncertain: row.price_uncertain === true,
+  // 這一樣的要求（不要香菜、去冰）。整張單的通則放在 order.note
+  note: row.note ?? null,
+  // 狀態屬於品項：同一張單裡先點的可能已到餐，後加的還沒點
+  status: row.status,
+  statusChangedAt: row.status_changed_at,
+  counted: isCounted(row.status),
   subtotal: row.unit_price * row.qty,
+  // 分單設定。實際付款人與金額由 lib/split.js 依全團的人重算後補上
+  shareScope: row.share_scope ?? 'owner',
+  sharedWith: row.shared_with ?? [],
 });
 
-export const toGroup = (row) => ({
+/**
+ * manageCode 只在呼叫端已經證明自己是發起人（或已經持有它）時才帶上，
+ * 預設不外流——它是一把可以改全團訂單的鑰匙，不該出現在誰都讀得到的快照裡。
+ */
+export const toGroup = (row, { manageCode = false } = {}) => ({
   id: row.id,
   joinCode: row.join_code,
   title: row.title,
@@ -49,80 +63,142 @@ export const toGroup = (row) => ({
     name: row.store_name,
     phone: row.store_phone,
   },
+  ...(manageCode ? { manageCode: row.manage_code } : {}),
 });
 
+const emptyStatusCounts = () => Object.fromEntries(ORDER_STATUSES.map((s) => [s, 0]));
+
+function countByStatus(items) {
+  const counts = emptyStatusCounts();
+  for (const item of items) {
+    if (counts[item.status] !== undefined) counts[item.status] += 1;
+  }
+  return counts;
+}
+
 /**
- * 兩份彙總，這是本系統真正的產出：
- *   byItem   合併所有人的相同品項 → 給店家叫餐
- *   byPerson 每個人的應付金額     → 給收錢的人
+ * 補上由品項推導的欄位。
+ * total 只算沒被撤掉的品項——撤掉的仍要留著顯示，但不能跟人收錢。
  */
-export function buildSummary(orders) {
-  const itemMap = new Map();
+export function decorateOrder(order) {
+  const items = order.items;
+  const counted = items.filter((item) => item.counted);
 
-  // 已撤單不進入叫餐清單，也不算錢。這是狀態功能的重點：
-  // 撤掉的單若仍計入總額，收錢時會多收。
-  const counted = orders.filter((order) => isCounted(order.status));
+  return {
+    ...order,
+    items,
+    total: counted.reduce((sum, item) => sum + item.subtotal, 0),
+    cancelledTotal: items
+      .filter((item) => !item.counted)
+      .reduce((sum, item) => sum + item.subtotal, 0),
+    status: rollupStatus(items),
+    statusCounts: countByStatus(items),
+    itemCount: counted.reduce((sum, item) => sum + item.qty, 0),
+    // 空單（品項都被刪光）不算一個人頭
+    counted: counted.length > 0,
+    priceUncertain: counted.some((item) => item.priceUncertain),
+  };
+}
 
-  for (const order of counted) {
-    for (const item of order.items) {
-      const key = `${item.isCustom ? 'c' : 'm'}|${item.name}|${item.unitPrice}|${item.priceUncertain ? 'u' : ''}`;
-      const existing = itemMap.get(key);
-      if (existing) {
-        existing.qty += item.qty;
-        existing.subtotal += item.subtotal;
-      } else {
-        itemMap.set(key, {
-          name: item.name,
-          unitPrice: item.unitPrice,
-          qty: item.qty,
-          subtotal: item.subtotal,
-          isCustom: item.isCustom,
-          priceUncertain: item.priceUncertain,
-        });
-      }
+/**
+ * 合併相同品項，供叫餐清單使用。
+ * 備註參與比對：「排骨飯 ×2」和「排骨飯（不要香菜）×1」對店家是兩件不同的事，
+ * 併成一列唸出去就會做錯。
+ */
+function mergeItems(items) {
+  const map = new Map();
+  for (const item of items) {
+    const key = `${item.isCustom ? 'c' : 'm'}|${item.name}|${item.unitPrice}|${item.priceUncertain ? 'u' : ''}|${item.note ?? ''}`;
+    const existing = map.get(key);
+    if (existing) {
+      existing.qty += item.qty;
+      existing.subtotal += item.subtotal;
+    } else {
+      map.set(key, {
+        name: item.name,
+        unitPrice: item.unitPrice,
+        qty: item.qty,
+        subtotal: item.subtotal,
+        isCustom: item.isCustom,
+        priceUncertain: item.priceUncertain,
+        note: item.note ?? null,
+      });
     }
   }
 
-  const byItem = [...itemMap.values()].sort(
-    (a, b) => Number(a.isCustom) - Number(b.isCustom) || b.qty - a.qty || a.name.localeCompare(b.name, 'zh-TW'),
+  return [...map.values()].sort(
+    (a, b) =>
+      Number(a.isCustom) - Number(b.isCustom) ||
+      b.qty - a.qty ||
+      a.name.localeCompare(b.name, 'zh-TW'),
   );
+}
 
-  // byPerson 保留所有人（含已撤單），讓介面能顯示「這個人撤掉了」，
-  // 但 counted 為 false 者不計入應收金額
+/**
+ * 彙總，這是本系統真正的產出：
+ *   byItem        合併所有人的相同品項 → 給店家叫餐
+ *   pendingByItem 其中還沒跟店家開口的 → 這一輪要加點的
+ *   byPerson      每個人的應付金額     → 給收錢的人
+ *   split         分單一覽（誰分了誰的東西）→ 對帳時解釋金額怎麼來的
+ *
+ * 已撤單的品項不進叫餐清單，也不算錢——留在清單上會多收。
+ *
+ * 傳入的 orders 必須已經過 applySplits（見 routes/groups.js 的 loadOrders），
+ * 每個人的應付金額來自分單計算，不是自己點的東西加總。
+ */
+export function buildSummary(orders) {
+  const allItems = orders.flatMap((order) => order.items);
+  const countedItems = allItems.filter((item) => item.counted);
+
+  const byItem = mergeItems(countedItems);
+  const pendingByItem = mergeItems(countedItems.filter((item) => item.status === 'pending'));
+  const split = buildSplitOverview(orders);
+
+  // byPerson 保留所有人（含整張都撤掉的、只登記還沒點的），讓介面能完整交代，
+  // 但 counted 為 false 者不計入人數與應收金額。
+  //
+  // ownTotal 是「自己點了多少」，payable 是「自己要付多少」——有分單時兩者不同，
+  // 收錢看 payable，核對點了什麼看 ownTotal。
   const byPerson = orders.map((order) => ({
     orderId: order.id,
     personName: order.personName,
-    total: order.total,
+    ownTotal: order.total,
+    payable: order.payable,
+    // payable 拆成兩塊：自己點的東西裡自己負擔的、加上別人點的東西分到的
+    ownPayable: order.ownPayable,
+    sharedIn: order.sharedIn,
+    sharedOut: order.sharedOut,
     status: order.status,
-    counted: isCounted(order.status),
-    itemCount: order.items.reduce((sum, i) => sum + i.qty, 0),
+    counted: order.payable > 0 || order.counted,
+    itemCount: order.itemCount,
     // 個人金額也要能標示估算，因為收錢是按人結算的
-    priceUncertain: order.items.some((i) => i.priceUncertain),
+    priceUncertain: order.payablePriceUncertain,
   }));
 
-  const statusCounts = Object.fromEntries(ORDER_STATUSES.map((s) => [s, 0]));
-  for (const order of orders) {
-    if (statusCounts[order.status] !== undefined) statusCounts[order.status] += 1;
-  }
-
-  // 未確認價格的部分金額，讓彙總能說出「其中 $X 是估的」而不是只給一個模糊警告
   const uncertainSubtotal = byItem
     .filter((i) => i.priceUncertain)
     .reduce((sum, i) => sum + i.subtotal, 0);
 
+  const cancelledItems = allItems.filter((item) => !item.counted);
+
   return {
     byItem,
+    pendingByItem,
     byPerson,
-    grandTotal: counted.reduce((sum, o) => sum + o.total, 0),
-    peopleCount: counted.length,
+    split,
+    grandTotal: countedItems.reduce((sum, item) => sum + item.subtotal, 0),
+    // 要付錢的人。只登記暱稱還沒點、也沒分擔到任何東西的人不算一個人頭
+    peopleCount: byPerson.filter((person) => person.counted).length,
+    // 登記在這一團裡的所有人，分單時可以選誰的依據
+    participantCount: orders.length,
     itemCount: byItem.reduce((sum, i) => sum + i.qty, 0),
     uncertainSubtotal,
     hasUncertainPrice: uncertainSubtotal > 0,
-    statusCounts,
-    cancelledCount: orders.length - counted.length,
-    cancelledTotal: orders
-      .filter((o) => !isCounted(o.status))
-      .reduce((sum, o) => sum + o.total, 0),
-    allServed: counted.length > 0 && counted.every((o) => o.status === 'served'),
+    // 狀態統計以「品項」為單位，因為狀態現在屬於品項
+    statusCounts: countByStatus(allItems),
+    cancelledCount: cancelledItems.length,
+    cancelledTotal: cancelledItems.reduce((sum, item) => sum + item.subtotal, 0),
+    allServed:
+      countedItems.length > 0 && countedItems.every((item) => item.status === 'served'),
   };
 }

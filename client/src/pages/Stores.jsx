@@ -17,8 +17,13 @@ import {
 } from '@mui/material';
 import ChevronRightIcon from '@mui/icons-material/ChevronRight';
 import DeleteOutlineIcon from '@mui/icons-material/DeleteOutline';
+import EditIcon from '@mui/icons-material/Edit';
+import Dialog from '@mui/material/Dialog';
+import DialogActions from '@mui/material/DialogActions';
+import DialogContent from '@mui/material/DialogContent';
+import DialogTitle from '@mui/material/DialogTitle';
 import { api } from '../lib/api.js';
-import { Layout, Header, Empty, ItemTags, money } from '../components/ui.jsx';
+import { Layout, Header, Empty, ItemTags, money, MAX_PRICE } from '../components/ui.jsx';
 
 export default function Stores() {
   const [stores, setStores] = useState(null);
@@ -125,6 +130,7 @@ function MenuEditor({ store, onBack }) {
   const [price, setPrice] = useState('');
   const [category, setCategory] = useState('');
   const [uncertain, setUncertain] = useState(false);
+  const [editing, setEditing] = useState(null);
   const [error, setError] = useState('');
   const [saving, setSaving] = useState(false);
 
@@ -145,8 +151,8 @@ function MenuEditor({ store, onBack }) {
     event.preventDefault();
     setError('');
     const value = Number(price);
-    if (!Number.isInteger(value) || value < 0 || value > 9999) {
-      setError('價格需為 0 ~ 9999 的整數');
+    if (!Number.isInteger(value) || value < 0 || value > MAX_PRICE) {
+      setError(`價格需為 0 ~ ${MAX_PRICE} 的整數`);
       return;
     }
     setSaving(true);
@@ -232,6 +238,9 @@ function MenuEditor({ store, onBack }) {
                   <Typography variant="body2" color="text.secondary" className="tnum" sx={{ mx: 1 }}>
                     {money(item.price)}
                   </Typography>
+                  <IconButton size="small" onClick={() => setEditing(item)} aria-label={`修改 ${item.name}`}>
+                    <EditIcon fontSize="small" />
+                  </IconButton>
                   <Button size="small" onClick={() => patch(item, { available: !item.available })} sx={{ minHeight: 36 }}>
                     {item.available ? '下架' : '上架'}
                   </Button>
@@ -274,6 +283,100 @@ function MenuEditor({ store, onBack }) {
           </Stack>
         </Card>
       </Stack>
+
+      <MenuItemEditDialog
+        item={editing}
+        onClose={() => setEditing(null)}
+        onSave={async (body) => {
+          setEditing(null);
+          await patch(editing, body);
+        }}
+      />
     </Layout>
+  );
+}
+
+/**
+ * 修改已經在菜單上的品項。
+ *
+ * 改價不會動到已經送出的訂單——order_items 存的是下單當下的名稱與價格快照
+ * （見 docs/ARCHITECTURE.md §6），所以這裡調整的是「之後點的人看到什麼」。
+ * 已經點過的人不會莫名其妙被追加金額，這是刻意的。
+ */
+function MenuItemEditDialog({ item, onClose, onSave }) {
+  return (
+    <Dialog open={Boolean(item)} onClose={onClose} fullWidth maxWidth="xs">
+      {item && <MenuItemEditForm key={item.id} item={item} onClose={onClose} onSave={onSave} />}
+    </Dialog>
+  );
+}
+
+function MenuItemEditForm({ item, onClose, onSave }) {
+  const [name, setName] = useState(item.name);
+  const [price, setPrice] = useState(String(item.price));
+  const [category, setCategory] = useState(item.category ?? '');
+  const [uncertain, setUncertain] = useState(item.priceUncertain === true);
+  const [error, setError] = useState('');
+
+  function submit() {
+    const trimmed = name.trim();
+    if (!trimmed) return setError('請填寫品名');
+
+    const value = Number(price);
+    if (price.trim() === '' || !Number.isInteger(value) || value < 0 || value > MAX_PRICE) {
+      return setError(`價格需為 0 ~ ${MAX_PRICE} 的整數`);
+    }
+
+    onSave({
+      name: trimmed,
+      price: value,
+      category: category.trim() || '主餐',
+      priceUncertain: uncertain,
+    });
+  }
+
+  return (
+    <>
+      <DialogTitle sx={{ pb: 1 }}>修改品項</DialogTitle>
+      <DialogContent>
+        <Stack spacing={2} sx={{ pt: 1 }}>
+          <TextField
+            label="品名"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            slotProps={{ htmlInput: { maxLength: 50 } }}
+          />
+          <TextField
+            label="價格"
+            value={price}
+            onChange={(e) => setPrice(e.target.value.replace(/\D/g, ''))}
+            slotProps={{ htmlInput: { inputMode: 'numeric', className: 'tnum' } }}
+          />
+          <TextField
+            label="分類"
+            value={category}
+            onChange={(e) => setCategory(e.target.value)}
+            helperText="留空預設為「主餐」"
+            slotProps={{ htmlInput: { maxLength: 20 } }}
+          />
+          <FormControlLabel
+            control={
+              <Checkbox checked={uncertain} onChange={(e) => setUncertain(e.target.checked)} />
+            }
+            label={<Typography variant="body2">價格待確認（只記得大概）</Typography>}
+          />
+          <Alert severity="info" sx={{ py: 0.25 }}>
+            已經送出的訂單不受影響，改的是之後點的人看到的價格。
+          </Alert>
+          {error && <Alert severity="error">{error}</Alert>}
+        </Stack>
+      </DialogContent>
+      <DialogActions sx={{ px: 3, pb: 2 }}>
+        <Button onClick={onClose}>取消</Button>
+        <Button variant="contained" onClick={submit}>
+          確定
+        </Button>
+      </DialogActions>
+    </>
   );
 }

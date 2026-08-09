@@ -1,7 +1,8 @@
 /**
- * 訂單狀態機
+ * 品項狀態機
  *
- * 對應「App 內先湊單 → 跟店家點 → 出餐」的實際流程：
+ * 狀態屬於「單一品項」而非整張訂單：聚會是一輪一輪點的，
+ * 先點的已經到餐時，後加的可能還沒跟店家開口。
  *
  *   pending          未點單   在 App 裡加好了，還沒跟店家開口
  *   ordered          已點單   已經跟店家點了
@@ -32,6 +33,22 @@ export const COUNTED_STATUSES = new Set(['pending', 'ordered', 'served', 'cancel
 export const isCounted = (status) => COUNTED_STATUSES.has(status);
 
 export const canTransition = (from, to) => TRANSITIONS[from]?.includes(to) === true;
+
+/**
+ * 整張單的狀態：由品項推導，取「最落後的那一項」。
+ * 有一樣還沒點，整張單就還沒點完——這是收錢的人真正想知道的事。
+ * 全部撤掉才算撤單；沒有品項的空單視為未點單。
+ */
+export function rollupStatus(items = []) {
+  const counted = items.filter((item) => isCounted(item.status));
+  if (items.length > 0 && counted.length === 0) return 'cancelled';
+  if (counted.length === 0) return 'pending';
+
+  if (counted.some((i) => i.status === 'pending')) return 'pending';
+  if (counted.some((i) => i.status === 'ordered')) return 'ordered';
+  if (counted.some((i) => i.status === 'cancel_requested')) return 'cancel_requested';
+  return 'served';
+}
 
 export const STATUS_LABELS = {
   pending: '未點單',

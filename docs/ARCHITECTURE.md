@@ -47,6 +47,8 @@ erDiagram
     group_orders ||--o{ orders       : "包含個人訂單"
     orders       ||--o{ order_items  : "包含品項"
     menu_items   ||--o{ order_items  : "被點選（可為空）"
+    order_items  ||--o{ order_item_shares : "分給誰付"
+    orders       ||--o{ order_item_shares : "分擔別人的"
 
     stores {
         bigint id PK
@@ -66,6 +68,7 @@ erDiagram
         uuid   id PK
         text   join_code UK "6 碼短碼，分享用"
         uuid   admin_token "開團者憑證"
+        text   manage_code "8 碼短碼，管理者憑證"
         bigint store_id FK
         text   title
         text   host_name
@@ -75,10 +78,11 @@ erDiagram
     orders {
         uuid   id PK
         uuid   group_order_id FK
-        text   person_name "點單者名字"
+        text   person_name "登記的暱稱，本團唯一"
         uuid   edit_token "本人憑證"
-        int    total "伺服器計算"
-        text   note
+        boolean is_manager "被指派的管理者"
+        int    total "自己點的金額，排除已撤單品項"
+        text   note "整張單的通則"
     }
     order_items {
         bigint id PK
@@ -87,7 +91,14 @@ erDiagram
         text   name "快照或自填"
         int    unit_price "快照或自填"
         int    qty
+        text   note "這一樣的要求"
+        text   status "未點單／已點單／已到餐／待撤單／已撤單"
+        text   share_scope "owner／all／custom"
         boolean is_custom "由 menu_item_id 推導"
+    }
+    order_item_shares {
+        bigint order_item_id FK
+        uuid   order_id FK "被分擔的人"
     }
 ```
 
@@ -117,6 +128,8 @@ create table group_orders (
   id          uuid primary key default gen_random_uuid(),
   join_code   text not null unique,
   admin_token uuid not null default gen_random_uuid(),
+  -- 管理者憑證。8 碼、人念得出來，一律連同 join_code 驗證，因此不必全域唯一
+  manage_code text not null default gen_group_manage_code(),
   store_id    bigint not null references stores(id),
   title       text not null,
   host_name   text not null,
@@ -131,27 +144,45 @@ create table orders (
   person_name    text not null,
   note           text,
   edit_token     uuid not null default gen_random_uuid(),
+  -- 發起人指派的管理者：用自己的 edit_token 就能代改全團的單
+  is_manager     boolean not null default false,
   total          int  not null default 0 check (total >= 0),
   created_at     timestamptz not null default now(),
   updated_at     timestamptz not null default now()
 );
 
 create table order_items (
-  id           bigint generated always as identity primary key,
-  order_id     uuid   not null references orders(id) on delete cascade,
-  menu_item_id bigint references menu_items(id),          -- null = 自填
-  name         text   not null,
-  unit_price   int    not null check (unit_price >= 0),
-  qty          int    not null check (qty > 0),
-  is_custom    boolean generated always as (menu_item_id is null) stored
+  id                bigint generated always as identity primary key,
+  order_id          uuid   not null references orders(id) on delete cascade,
+  menu_item_id      bigint references menu_items(id),      -- null = 自填
+  name              text   not null,
+  unit_price        int    not null check (unit_price >= 0),
+  qty               int    not null check (qty > 0),
+  note              text,                                  -- 這一樣的要求
+  is_custom         boolean generated always as (menu_item_id is null) stored,
+  status            text not null default 'pending',       -- 狀態屬於品項，不屬於訂單
+  status_changed_at timestamptz not null default now(),
+  share_scope       text not null default 'owner'          -- owner / all / custom
+    check (share_scope in ('owner', 'all', 'custom'))
 );
 
-create index idx_menu_store   on menu_items   (store_id, category, sort_order);
-create index idx_orders_group on orders       (group_order_id);
-create index idx_items_order  on order_items  (order_id);
+-- 分單名單。只存「其他人」，不存擁有者自己
+create table order_item_shares (
+  order_item_id bigint not null references order_items(id) on delete cascade,
+  order_id      uuid   not null references orders(id)      on delete cascade,
+  primary key (order_item_id, order_id)
+);
+
+create index idx_menu_store        on menu_items   (store_id, category, sort_order);
+create index idx_orders_group      on orders       (group_order_id);
+create index idx_items_order       on order_items  (order_id);
+create index idx_items_order_status on order_items (order_id, status);
+create index idx_shares_order      on order_item_shares (order_id);
 ```
 
-**三個設計決策**
+**設計決策**
+
+**狀態屬於品項，不屬於訂單。** 聚會是一輪一輪點的：先點的已經到餐時，後加的還沒跟店家開口，整張單根本沒有單一狀態可言。`orders` 因此沒有 status 欄位，整張單的狀態一律由品項推導（取最落後的那一項，見 `lib/orderStatus.js` 的 `rollupStatus`）。`orders.total` 是快取，唯一的事實來源是 `order_items`，任何品項異動都要經過 `lib/pricing.js` 的 `refreshOrderTotal` 重算。
 
 `order_items` 一律儲存 `name` 與 `unit_price`，`menu_item_id` 只是「這筆是從哪個菜單品項來的」的參照。這讓「菜單品項」與「自填品項」用同一張表表達，彙總與計價的程式碼完全不必分岔——這是支援自填功能最省事的模型。
 
@@ -159,19 +190,49 @@ create index idx_items_order  on order_items  (order_id);
 
 `join_code` 是 6 碼短碼（排除 `0OIl1` 等易混淆字元），因為它會被口頭念出來或貼在群組裡；`admin_token` 和 `edit_token` 則是 uuid，不需要人讀。
 
+**一張單就是一個人。** 沒有獨立的 `participants` 表——第一次進團要先登記暱稱，登記出來的就是一張還沒有品項的 `orders`。有單才有身分：別人選得到你來分單，你之後加點也不必再打一次名字。加一張表來表達同一件事只會多出「單和人對不起來」這種需要處理的狀態。空單不算人頭（`decorateOrder` 的 `counted` 為 false），但只要有人把東西分給他就算。
+
+**分單的金額不落地。** `order_items.share_scope` 只說明「這一樣該分給誰」，每個人實際付多少一律在讀取時由 `lib/split.js` 重算。理由是「全部平分」的分母會變——中途有人加入或退出時，若金額已經寫死在資料庫，就得回頭更新一票不相干的列，漏掉一列就是一筆對不起來的帳。重算的成本是每次讀團多跑一次全表走訪，資料量在一桌人的規模，可以忽略。
+
+`custom` 只存其他人、不存擁有者：擁有者必然要付，而且下單當下那張單的 id 還不存在。
+
+金額除不盡時（100 分三人），餘數以一元為單位逐一分配，起點依品項 id 輪替——固定從第一個人開始的話，排最前面的人會被每一筆除不盡的品項各多收一元。**總和永遠等於原金額**，這是 `server/smoke.js` 每一步都在驗的不變式。
+
 ## 5. 身分與權限：無登入的 token 模型
 
 **完全不做帳號系統。** 團購的價值在於零阻力，要求註冊會直接殺掉使用率。
 
-改用三種憑證：
+改用四種憑證：
 
 | 憑證 | 誰持有 | 能做什麼 | 存在哪 |
 |---|---|---|---|
-| `join_code` | 團裡所有人 | 看團、看所有人的訂單、加入自己的單 | URL |
-| `edit_token` | 下單本人 | 修改／刪除自己那筆訂單 | localStorage |
-| `admin_token` | 開團者 | 關團、改截止時間、代刪任何訂單 | localStorage |
+| `join_code` | 團裡所有人 | 看團、看所有人的訂單、登記暱稱、**改任何品項的狀態** | URL |
+| `edit_token` | 下單本人 | 加點、修改／刪除自己那筆訂單的內容，**但只動得了「未點單」的品名與數量** | localStorage |
+| `manage_code` | 發起人給出去的人 | 代改任何人的單一品項、代刪、批次改狀態，不受截止時間與品項狀態限制 | localStorage |
+| `admin_token` | 開團者 | 管理者的一切，**再加上**關團、改截止時間、刪團、指派管理者 | localStorage |
 
-伺服器端以 HTTP header 驗證（`X-Edit-Token`、`X-Admin-Token`），前端的按鈕顯示與否只是體驗，**權限判斷一律在後端**。
+伺服器端以 HTTP header 驗證（`X-Edit-Token`、`X-Manage-Code`、`X-Admin-Token`），判定集中在 `lib/auth.js` 的 `resolveActor`。前端的按鈕顯示與否只是體驗，**權限判斷一律在後端**。
+
+**為什麼要有「管理者」這一層。** 原本只有發起人與本人兩種身分，但發起人自己也在吃飯——收拾殘局（補價、改備註、把菜挪去分帳、跟店家點完後推進度）常常是坐在他旁邊那個人在做。把 `admin_token` 給出去可以解決，代價是那個人連刪團都做得到，而且 uuid 沒辦法用嘴巴念。
+
+管理者因此有兩條來源，刻意等價：
+
+```
+manage_code           8 碼，開團時產生，只有發起人看得到。念給誰，誰就是管理者。
+                      不必事先登記，所以「幫忙結帳但自己沒點東西」的人也能用。
+orders.is_manager     發起人在清單頁直接勾選某個已登記的參與者。
+                      那個人用自己原本的 edit_token 就有權限，不必再傳一次代碼。
+```
+
+分界線在「這一攤的生死」：關團、改截止、刪團、指派管理者只有發起人做得到。管理者只能代表發起人處理訂單，收得回來（把開關關掉即可），也給得出去。
+
+`manage_code` 一律連同 `join_code` 一起驗證，因此不需要全域唯一。已知取捨：代碼給出去就收不回來（除非整團重開），要能收回權限請改用逐一指派。
+
+**點過的東西，本人就不能再改品名與數量。** 品項一旦離開「未點單」，店家那邊已經記下了品名與數量，本人再改只會讓 App 上的清單與店家手上的單對不起來——真正該做的是跟店家重講一次，所以介面把他導向「另外加點一筆」或「撤單」。同理，已點單的品項本人也不能直接刪除（會繞過這條規則，而且撤單才留得下紀錄），整張單裡只要有一樣已點單就不能整張刪掉。
+
+只鎖品名與數量，**價格、備註與分單仍然可以改**：自填品項常常是「先點了，結帳才知道多少錢」，價格待確認要靠本人補；分單也多半是結帳當下才喬。這些一起擋掉只會把所有工作推回發起人身上，而那正是加管理者這一層要解決的問題。發起人與管理者不受此限。
+
+**品項狀態是唯一不需憑證的寫入。** 現場誰看到餐送上桌誰就按得掉——服務生把酒端來時，點的人可能正在廁所，要求本人操作等於這個功能不會被用。拿得到團號就是同一桌的人，而且能改的只有進度，改不了金額與內容。代價是同桌的人可以亂按彼此的狀態，而且沒有紀錄是誰按的；這在聚會情境下可以接受，換成陌生人的場景就不行。
 
 已知取捨：知道團號的人可以看到團內所有人點了什麼。辦公室情境下這本來就是公開資訊（大家要一起看彙總），因此接受。
 
@@ -188,7 +249,7 @@ create index idx_items_order  on order_items  (order_id);
 
 無 menuItemId  → 採用前端送的 name 與 price（自填）
                  驗證 name 非空且 ≤ 50 字
-                 驗證 price 介於 0 ~ 9999
+                 驗證 price 介於 0 ~ 200000
 ```
 
 `total` **永遠由伺服器重算**，前端送來的金額一律丟棄。
@@ -197,42 +258,73 @@ create index idx_items_order  on order_items  (order_id);
 
 ## 7. API 契約
 
+> 逐一端點的請求／回應欄位、驗證限制、錯誤碼與程式操作範例見 **[docs/API.md](API.md)**。本節只列輪廓。
+
 ```
-# 店家與菜單
-GET    /api/stores                      列出啟用中的店家
-POST   /api/stores                      新增店家
-GET    /api/stores/:id/menu             取得店家菜單
-POST   /api/stores/:id/menu             新增菜單品項
-PATCH  /api/menu-items/:id              修改／上下架
+# 店家與菜單（無需憑證）
+GET    /api/stores                          列出啟用中的店家
+POST   /api/stores                          新增店家
+DELETE /api/stores/:id                      軟刪除店家
+GET    /api/stores/:id/menu                 取得店家菜單（含下架品項）
+POST   /api/stores/:id/menu                 新增菜單品項
+PATCH  /api/menu-items/:id                  修改／上下架
+DELETE /api/menu-items/:id                  刪除品項
 
 # 團
-POST   /api/groups                      開團 → { joinCode, adminToken }
-GET    /api/groups/:joinCode            團資訊 + 所有訂單 + 彙總
-PATCH  /api/groups/:joinCode            關團／改截止時間   [X-Admin-Token]
+POST   /api/groups                          開團 → { joinCode, adminToken, manageCode }
+GET    /api/groups?storeId=&title=          查同名收單中的團
+GET    /api/groups/:joinCode                團資訊 + 菜單 + 所有訂單 + 彙總
+                                            （帶憑證才回 group.manageCode）
+POST   /api/groups/:joinCode/manage-code    驗證管理代碼
+PATCH  /api/groups/:joinCode                關團／改截止時間   [X-Admin-Token]
+DELETE /api/groups/:joinCode                刪團（cascade）    [X-Admin-Token]
+PATCH  /api/groups/:joinCode/orders/status  批次改品項狀態     [管理者以上]
 
 # 個人訂單
-POST   /api/groups/:joinCode/orders     送出訂單 → { orderId, editToken }
-PUT    /api/orders/:orderId             修改訂單            [X-Edit-Token]
-DELETE /api/orders/:orderId             刪除訂單            [X-Edit-Token 或 X-Admin-Token]
+POST   /api/groups/:joinCode/orders         登記暱稱／送出訂單 → { orderId, editToken }
+                                            （items 可為空 = 只登記）
+PATCH  /api/orders/:orderId                 改暱稱／備註        [本人或管理者以上]
+POST   /api/orders/:orderId/items           加點（追加品項）    [本人或管理者以上]
+DELETE /api/orders/:orderId                 刪除整張單          [本人或管理者以上]
+PATCH  /api/orders/:orderId/manager         指派／取消管理者    [X-Admin-Token]
+
+# 單一品項
+PATCH  /api/order-items/:itemId             改數量／品名／價格／備註／分單
+                                                                [本人或管理者以上]
+DELETE /api/order-items/:itemId             刪掉其中一樣        [本人或管理者以上]
+PATCH  /api/order-items/:itemId/status      改品項狀態          （不需憑證）
+PATCH  /api/orders/:orderId/status          整張單一次改狀態    （不需憑證）
 ```
+
+「管理者以上」＝ `X-Manage-Code`、被指派者的 `X-Edit-Token`，或 `X-Admin-Token`。本人動已點單的品項時，品名與數量會被擋下（見 §5）。
+
+**沒有「整筆覆蓋」的改單 API。** 覆蓋會把已經跟店家點過、甚至已經到餐的品項連同狀態一起洗掉，所以改單拆成三個各自獨立的動作：加點只追加、改內容只動一列、刪除只刪一列。這也是「已經送單後還能繼續點」能成立的前提。
 
 送單 payload：
 
 ```jsonc
 {
   "personName": "小明",
-  "note": "不要香菜",
+  "note": "我晚點到",                                          // 整張單的通則
   "items": [
-    { "menuItemId": 12, "qty": 1 },                          // 菜單品項，價格由伺服器決定
-    { "name": "自己加的珍奶", "unitPrice": 60, "qty": 2 }      // 自填品項
+    { "menuItemId": 12, "qty": 1, "note": "不要香菜" },        // 菜單品項，價格由伺服器決定
+    { "name": "自己加的珍奶", "unitPrice": 60, "qty": 2 },      // 自填品項
+    { "menuItemId": 30, "qty": 1, "shareScope": "all" },       // 全團平分
+    { "menuItemId": 31, "qty": 1,                              // 指定的人一起分
+      "shareScope": "custom", "sharedWith": ["<orderId>"] }
   ]
 }
 ```
 
-`GET /api/groups/:joinCode` 的回應同時包含兩份彙總，因為這是本系統真正的產出：
+`items` 可以是空陣列——那就是「只登記暱稱」。
+
+`GET /api/groups/:joinCode` 的回應包含三份彙總，因為這是本系統真正的產出：
 
 - **依品項彙總**：合併所有人的相同品項 → 給店家叫餐用
-- **依人彙總**：每個人的品項與應付金額 → 給收錢的人用
+- **依人彙總**：每個人的應付金額（`payable`，已含分單）→ 給收錢的人用
+- **分單一覽**（`summary.split`）：哪幾樣被分著付、每個人各分到多少 → 有人覺得金額不對時，答案在這裡
+
+`ownTotal`（自己點了多少）與 `payable`（自己要付多少）在有分單時是兩個不同的數字，收錢一律看 `payable`。
 
 ## 8. 前端結構與版面約束
 
@@ -254,7 +346,7 @@ Tailwind：`<div className="mx-auto max-w-[500px] min-h-dvh">`。用 `min-h-dvh`
 |---|---|
 | `/` | 開新團 ／ 輸入團號加入 |
 | `/new` | 開團：選店家、團名、你的名字、截止時間 |
-| `/g/:joinCode` | 團主頁，三個 tab：**點餐** ／ **大家點了什麼** ／ **彙總** |
+| `/g/:joinCode` | 團主頁，三個 tab：**點餐** ／ **清單** ／ **結帳** |
 | `/stores` | 店家與菜單管理 |
 
 手機上用 tab 而非多頁，可以避免來回導航時遺失捲動位置。
@@ -265,28 +357,33 @@ Tailwind：`<div className="mx-auto max-w-[500px] min-h-dvh">`。用 `min-h-dvh`
 client/src/
 ├── main.jsx
 ├── App.jsx
-├── lib/api.js                   fetch 封裝，自動帶入 token header
-├── hooks/useTokens.js           localStorage 管理 editToken / adminToken
+├── lib/api.js                   fetch 封裝，錯誤帶 HTTP status
+├── lib/storage.js               localStorage：憑證、名字、參與過的團
+├── lib/orderStatus.js           狀態顯示設定（轉移規則與後端一致）＋ 品項可改與否
 ├── pages/
-│   ├── Home.jsx
+│   ├── Home.jsx                 開團／加入／最近參與的（會自動校正已刪除的）
 │   ├── NewGroup.jsx
 │   ├── Group.jsx                含三個 tab
 │   └── Stores.jsx
 └── components/
-    ├── Layout.jsx               500px 容器 + 固定頁首頁尾
-    ├── MenuPicker.jsx           菜單選擇
-    ├── CustomItemForm.jsx       自填品項（名稱 + 價格 + 數量）
-    ├── MyOrder.jsx              我的訂單，可編輯
-    ├── PeopleList.jsx           所有人的訂單
-    └── Summary.jsx              兩份彙總
+    ├── ui.jsx                   Layout／Header／金額顯示等共用零件
+    ├── OrderTab.jsx             登記暱稱 ＋ 我的單（逐項狀態）＋ 菜單 ＋ 加點清單
+    ├── ItemStatusChip.jsx       單一品項的狀態，點一下就能改
+    ├── ItemEditDialog.jsx       改品名／價格／數量／備註／分單（加點清單與已送出共用）
+    ├── ShareSelect.jsx          這一樣誰要付：我自己／全部平分／指定的人
+    ├── GroupManage.jsx          清單頁最上面：進度＋批次、參與者權限、管理代碼
+    ├── PeopleList.jsx           所有人的訂單；狀態誰都能改，內容需憑證
+    └── Summary.jsx              叫餐清單 ＋ 這一輪 ＋ 分帳 ＋ 分單一覽
 
 server/
 ├── index.js                     Express 啟動 + 靜態檔
 ├── db.js                        pg Pool
 ├── routes/{stores,groups,orders}.js
-├── lib/{codes,pricing,validate}.js
-└── migrations/0001_init.sql
+├── lib/{auth,codes,pricing,validate,orderStatus,split,serialize}.js
+└── migrations/000*.sql
 ```
+
+**進度為什麼在「清單」而不是「結帳」。** 想知道「這一輪還有誰沒點到」的時機，就是在看誰點了什麼的當下——兩者是同一件事，隔一個 tab 只會讓人來回切。結帳頁留給金額。
 
 **狀態歸屬**：購物車在送出前只存在前端（localStorage 草稿）；`editToken` / `adminToken` 存 localStorage；其餘一切以資料庫為唯一真實來源。
 
@@ -296,21 +393,28 @@ server/
 
 ```
 開團者  →  POST /api/groups { storeId, title, hostName, deadlineAt }
-        ←  { joinCode: "K7M2QX", adminToken }
+        ←  { joinCode: "K7M2QX", adminToken, manageCode: "5PV2XXAD" }
         存 adminToken 到 localStorage，分享 /g/K7M2QX 連結
+        manageCode 不必存——之後帶 adminToken 讀團就會再回傳一次，
+        顯示在清單頁供發起人念給幫忙的人
 ```
 
 **參加者下單**
 
 ```
 參加者  →  GET  /api/groups/K7M2QX            取得菜單與現有訂單
-        →  POST /api/groups/K7M2QX/orders    送出（菜單品項 + 自填品項）
+        →  POST /api/groups/K7M2QX/orders    第一次：只帶 personName，items 為空
+              伺服器：建立一張沒有品項的單 = 登記暱稱
+        ←  { orderId, editToken }            存起來，這一團的身分就固定了
+
+        →  POST /api/orders/:orderId/items   之後一律走加點，不必再送名字
               伺服器：驗證團未關閉且未逾期
                      菜單品項改用 DB 價格
                      自填品項驗證範圍
-                     計算 total，寫入 orders + order_items（單一 transaction）
-        ←  { orderId, editToken }
-        存 editToken，之後可改可刪
+                     分單對象必須是同一團的人
+                     寫入 order_items + order_item_shares、重算 total
+                     （單一 transaction）
+        ←  { addedItemIds, total }
 ```
 
 **關團與結算**
@@ -353,9 +457,15 @@ Neon 建議使用 **pooled connection**（連線字串含 `-pooler`），因為 
 |---|---|---|
 | 無帳號系統 | 知道團號即可看全團訂單 | 辦公室情境接受；團號不可猜 |
 | `edit_token` 存 localStorage | 換手機或清快取後改不了自己的單 | 開團者持 `admin_token` 可代改代刪 |
+| `manage_code` 給出去收不回來 | 拿到的人一直是管理者，直到整團結束 | 要能收回請改用逐一指派（清單頁的開關） |
+| 管理代碼可被暴力猜 | 有團號的人可以一直試 | 8 碼 ÷ 31 字元 ≈ 8.5×10¹¹ 種；目前**沒有速率限制**，多實例部署下也不好做，接受 |
+| 管理者的操作沒有紀錄 | 不知道是誰改了誰的單 | 與品項狀態同樣的取捨；聚會情境接受 |
 | 自填價格無法驗證 | 打錯價格會影響對帳 | 彙總頁把自填品項標示出來，讓大家核對 |
 | 截止時間 | 只擋前端等於沒擋 | 伺服器端在送單時檢查 `status` 與 `deadline_at` |
-| 重複送單 | 連點兩次產生兩筆 | 送出後停用按鈕；同團同名字給予提示（不強制擋，可能真有同名） |
+| 重複送單 | 連點兩次產生兩筆 | 送出後停用按鈕；同團同暱稱由唯一索引擋下並要求區隔 |
+| 分單「全部平分」 | 分母隨參與者變動，先算過的人金額會跟著變 | 刻意如此：金額不落地，一律重算。晚到的人本來就該一起分 |
+| 分單零頭 | 100 分三人，總有人多付一元 | 依品項 id 輪替分配；總和永遠等於原金額 |
+| 換裝置後身分遺失 | 會被要求重新登記，變成第二個人 | 開團者可代刪重複的空單；`edit_token` 仍存 localStorage |
 | 冷啟動 | 第一個開團的人等數秒 | 接受；介意則升級 Developer 方案 |
 | Neon 免費容量 | 約 0.5GB | 團購資料量極小，數年無虞 |
 

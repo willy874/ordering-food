@@ -60,7 +60,7 @@ await call(`/menu-items/${offItem.data.id}`, { method: 'PATCH', body: { availabl
 
 const badPrice = await call(`/stores/${store.data.id}/menu`, {
   method: 'POST',
-  body: { name: '天價便當', price: 99999 },
+  body: { name: '天價便當', price: 999999 },
 });
 check('拒絕超出範圍的價格', badPrice.status === 400, `status=${badPrice.status}`);
 
@@ -143,25 +143,54 @@ check(
 
 // ── 權限 ──────────────────────────────────────────────────────
 console.log('\n權限');
-const noToken = await call(`/orders/${tampered.data.orderId}`, {
-  method: 'PUT',
-  body: { personName: '駭客', items: [{ menuItemId: bento.data.id, qty: 1 }] },
+const noToken = await call(`/orders/${tampered.data.orderId}/items`, {
+  method: 'POST',
+  body: { items: [{ menuItemId: bento.data.id, qty: 1 }] },
 });
-check('沒有 token 不能改單', noToken.status === 403, `status=${noToken.status}`);
+check('沒有 token 不能加點', noToken.status === 403, `status=${noToken.status}`);
 
-const wrongToken = await call(`/orders/${tampered.data.orderId}`, {
-  method: 'PUT',
+const wrongToken = await call(`/orders/${tampered.data.orderId}/items`, {
+  method: 'POST',
   headers: { 'X-Edit-Token': '00000000-0000-0000-0000-000000000000' },
-  body: { personName: '駭客', items: [{ menuItemId: bento.data.id, qty: 1 }] },
+  body: { items: [{ menuItemId: bento.data.id, qty: 1 }] },
 });
-check('錯誤的 token 不能改單', wrongToken.status === 403, `status=${wrongToken.status}`);
+check('錯誤的 token 不能加點', wrongToken.status === 403, `status=${wrongToken.status}`);
 
-const ownEdit = await call(`/orders/${tampered.data.orderId}`, {
-  method: 'PUT',
-  headers: { 'X-Edit-Token': tampered.data.editToken },
-  body: { personName: '小華', items: [{ menuItemId: bento.data.id, qty: 1 }] },
+const detailBefore = await call(`/groups/${code}`);
+const myItem = detailBefore.data.orders.find((o) => o.personName === '小華').items[0];
+
+const noTokenPatch = await call(`/order-items/${myItem.id}`, {
+  method: 'PATCH',
+  body: { qty: 9 },
 });
-check('本人可以改單（改成 90）', ownEdit.data?.total === 90, `total=${ownEdit.data?.total}`);
+check('沒有 token 不能改品項內容', noTokenPatch.status === 403, `status=${noTokenPatch.status}`);
+
+const ownEdit = await call(`/orders/${tampered.data.orderId}/items`, {
+  method: 'POST',
+  headers: { 'X-Edit-Token': tampered.data.editToken },
+  body: { items: [{ name: '本人加點的啤酒', unitPrice: 120, qty: 1 }] },
+});
+check('本人可以加點（180 + 120 = 300）', ownEdit.data?.total === 300, `total=${ownEdit.data?.total}`);
+
+const qtyPatch = await call(`/order-items/${myItem.id}`, {
+  method: 'PATCH',
+  headers: { 'X-Edit-Token': tampered.data.editToken },
+  body: { qty: 1 },
+});
+check('本人可以改數量（90 + 120 = 210）', qtyPatch.data?.total === 210, `total=${qtyPatch.data?.total}`);
+check('只改數量不會脫離菜單', qtyPatch.data?.item?.menuItemId === bento.data.id);
+
+const renamePatch = await call(`/order-items/${myItem.id}`, {
+  method: 'PATCH',
+  headers: { 'X-Edit-Token': tampered.data.editToken },
+  body: { name: '排骨便當（大）', unitPrice: 110 },
+});
+check('可以改品名與價格', renamePatch.data?.item?.name === '排骨便當（大）');
+check(
+  '改過內容就轉成自填品項（否則會被菜單蓋回去）',
+  renamePatch.data?.item?.menuItemId === null && renamePatch.data?.item?.isCustom === true,
+);
+check('改價後金額重算（110 + 120 = 230）', renamePatch.data?.total === 230, `total=${renamePatch.data?.total}`);
 
 const hostEdit = await call(`/orders/${custom.data.orderId}`, {
   method: 'DELETE',
@@ -191,12 +220,12 @@ const afterClose = await call(`/groups/${code}/orders`, {
 });
 check('關團後不能再下單', afterClose.status === 400, `status=${afterClose.status}`);
 
-const editAfterClose = await call(`/orders/${tampered.data.orderId}`, {
-  method: 'PUT',
+const editAfterClose = await call(`/orders/${tampered.data.orderId}/items`, {
+  method: 'POST',
   headers: { 'X-Edit-Token': tampered.data.editToken },
-  body: { personName: '小華', items: [{ menuItemId: bento.data.id, qty: 5 }] },
+  body: { items: [{ menuItemId: bento.data.id, qty: 5 }] },
 });
-check('關團後本人不能改單', editAfterClose.status === 400, `status=${editAfterClose.status}`);
+check('關團後本人不能加點', editAfterClose.status === 400, `status=${editAfterClose.status}`);
 
 // ── 價格未確認 ────────────────────────────────────────────────
 console.log('\n價格未確認');
@@ -318,8 +347,8 @@ const orphan = await pool.query('select count(*)::int n from orders where id = $
 ]);
 check('團內訂單一併被刪除（cascade）', orphan.rows[0].n === 0);
 
-// ── 訂單狀態 ──────────────────────────────────────────────────
-console.log('\n訂單狀態');
+// ── 品項狀態 ──────────────────────────────────────────────────
+console.log('\n品項狀態');
 const sGroup = await call('/groups', {
   method: 'POST',
   body: { storeId: store.data.id, title: '[smoke] 狀態團', hostName: '小明' },
@@ -336,72 +365,109 @@ const oA = await mkOrder('阿一');
 const oB = await mkOrder('阿二');
 const oC = await mkOrder('阿三');
 
-const initial = await call(`/groups/${sCode}`);
-check('新訂單預設為未點單', initial.data.orders.every((o) => o.status === 'pending'));
-check('狀態統計正確', initial.data.summary.statusCounts.pending === 3);
+const itemsOf = (detail, personName) =>
+  detail.data.orders.find((o) => o.personName === personName).items;
 
-const badJump = await call(`/orders/${oA.data.orderId}/status`, {
+const initial = await call(`/groups/${sCode}`);
+check('新品項預設為未點單', initial.data.orders.every((o) => o.items.every((i) => i.status === 'pending')));
+check('整張單的狀態由品項推導', initial.data.orders.every((o) => o.status === 'pending'));
+check('狀態統計以品項為單位', initial.data.summary.statusCounts.pending === 3);
+
+const itemA = itemsOf(initial, '阿一')[0];
+const itemB = itemsOf(initial, '阿二')[0];
+const itemC = itemsOf(initial, '阿三')[0];
+
+const badJump = await call(`/order-items/${itemA.id}/status`, {
   method: 'PATCH',
-  headers: { 'X-Edit-Token': oA.data.editToken },
   body: { status: 'served' },
 });
 check('未點單不能直接跳到已到餐', badJump.status === 400, `status=${badJump.status}`);
 
-const toOrdered = await call(`/orders/${oA.data.orderId}/status`, {
+const toOrdered = await call(`/order-items/${itemA.id}/status`, {
   method: 'PATCH',
-  headers: { 'X-Edit-Token': oA.data.editToken },
   body: { status: 'ordered' },
 });
 check('未點單 → 已點單', toOrdered.data?.status === 'ordered');
 
-const toServed = await call(`/orders/${oA.data.orderId}/status`, {
+const toServed = await call(`/order-items/${itemA.id}/status`, {
   method: 'PATCH',
-  headers: { 'X-Edit-Token': oA.data.editToken },
   body: { status: 'served' },
 });
 check('已點單 → 已到餐', toServed.data?.status === 'served');
 
-const statusNoToken = await call(`/orders/${oB.data.orderId}/status`, {
+// 狀態是全系統唯一不需憑證的寫入：現場誰看到餐送來誰就能按
+const statusNoToken = await call(`/order-items/${itemB.id}/status`, {
   method: 'PATCH',
   body: { status: 'ordered' },
 });
-check('沒有 token 不能改狀態', statusNoToken.status === 403, `status=${statusNoToken.status}`);
+check('任何人都能改品項狀態（不需憑證）', statusNoToken.data?.status === 'ordered', `status=${statusNoToken.status}`);
 
-const hostSetStatus = await call(`/orders/${oB.data.orderId}/status`, {
-  method: 'PATCH',
-  headers: { 'X-Admin-Token': sGroup.data.adminToken },
-  body: { status: 'ordered' },
+// ── 已送單之後繼續加點 ────────────────────────────────────────
+console.log('\n已送單之後繼續加點');
+const secondRound = await call(`/orders/${oA.data.orderId}/items`, {
+  method: 'POST',
+  headers: { 'X-Edit-Token': oA.data.editToken },
+  body: { items: [{ name: '第二輪的酒', unitPrice: 300, qty: 1 }] },
 });
-check('發起人可以改別人的狀態', hostSetStatus.data?.status === 'ordered');
+check('已到餐的單仍可加點', secondRound.status === 201, `status=${secondRound.status}`);
 
-// 撤單流程與金額排除
-await call(`/orders/${oC.data.orderId}/status`, {
-  method: 'PATCH',
-  headers: { 'X-Edit-Token': oC.data.editToken },
-  body: { status: 'ordered' },
-});
-await call(`/orders/${oC.data.orderId}/status`, {
-  method: 'PATCH',
-  headers: { 'X-Edit-Token': oC.data.editToken },
-  body: { status: 'cancel_requested' },
-});
+const roundDetail = await call(`/groups/${sCode}`);
+const aItems = itemsOf(roundDetail, '阿一');
+check('加點不會動到既有品項的狀態', aItems.find((i) => i.id === itemA.id)?.status === 'served');
+check('新加的品項是未點單', aItems.find((i) => i.name === '第二輪的酒')?.status === 'pending');
+check('同一張單可以同時有已到餐與未點單', new Set(aItems.map((i) => i.status)).size === 2);
+check('整張單的狀態退回最落後的那一項', roundDetail.data.orders.find((o) => o.personName === '阿一')?.status === 'pending');
+check('金額累加（90 + 300 = 390）', roundDetail.data.orders.find((o) => o.personName === '阿一')?.total === 390);
+check(
+  '「還沒跟店家點的」只列出未點單的品項',
+  roundDetail.data.summary.pendingByItem.some((i) => i.name === '第二輪的酒') &&
+    !roundDetail.data.summary.pendingByItem.some((i) => i.name === '排骨便當' && i.qty > 2),
+);
+
+// ── 撤單只影響單一品項 ────────────────────────────────────────
+console.log('\n撤單');
+await call(`/order-items/${itemC.id}/status`, { method: 'PATCH', body: { status: 'ordered' } });
+await call(`/order-items/${itemC.id}/status`, { method: 'PATCH', body: { status: 'cancel_requested' } });
 const beforeCancel = await call(`/groups/${sCode}`);
-check('待撤單仍計入金額（90×3=270）', beforeCancel.data.summary.grandTotal === 270, `total=${beforeCancel.data.summary.grandTotal}`);
+check(
+  '待撤單仍計入金額（90×3 + 300 = 570）',
+  beforeCancel.data.summary.grandTotal === 570,
+  `total=${beforeCancel.data.summary.grandTotal}`,
+);
 
-await call(`/orders/${oC.data.orderId}/status`, {
-  method: 'PATCH',
-  headers: { 'X-Edit-Token': oC.data.editToken },
-  body: { status: 'cancelled' },
-});
+await call(`/order-items/${itemC.id}/status`, { method: 'PATCH', body: { status: 'cancelled' } });
 const afterCancel = await call(`/groups/${sCode}`);
-check('已撤單不計入金額（90×2=180）', afterCancel.data.summary.grandTotal === 180, `total=${afterCancel.data.summary.grandTotal}`);
-check('已撤單不計入人數', afterCancel.data.summary.peopleCount === 2, `n=${afterCancel.data.summary.peopleCount}`);
+check(
+  '已撤單不計入金額（570 - 90 = 480）',
+  afterCancel.data.summary.grandTotal === 480,
+  `total=${afterCancel.data.summary.grandTotal}`,
+);
+check('整張單都撤掉的人不計入人數', afterCancel.data.summary.peopleCount === 2, `n=${afterCancel.data.summary.peopleCount}`);
 check('已撤單不進入叫餐清單（排骨便當 ×2）', afterCancel.data.summary.byItem.find((i) => i.name === '排骨便當')?.qty === 2);
 check('撤單金額另計', afterCancel.data.summary.cancelledTotal === 90, `n=${afterCancel.data.summary.cancelledTotal}`);
-check('byPerson 仍保留已撤單者但標記 counted=false',
-  afterCancel.data.summary.byPerson.find((p) => p.personName === '阿三')?.counted === false);
+check('撤單後 orders.total 一併重算', afterCancel.data.orders.find((o) => o.personName === '阿三')?.total === 0);
+check(
+  'byPerson 仍保留已撤單者但標記 counted=false',
+  afterCancel.data.summary.byPerson.find((p) => p.personName === '阿三')?.counted === false,
+);
 
-// 批次
+// 只撤掉一張單裡的其中一樣
+const partial = await call(`/orders/${oB.data.orderId}/items`, {
+  method: 'POST',
+  headers: { 'X-Edit-Token': oB.data.editToken },
+  body: { items: [{ name: '點錯的東西', unitPrice: 500, qty: 1 }] },
+});
+check('阿二加點後 90 + 500 = 590', partial.data?.total === 590, `total=${partial.data?.total}`);
+const wrongItemId = partial.data.addedItemIds[0];
+await call(`/order-items/${wrongItemId}/status`, { method: 'PATCH', body: { status: 'cancelled' } });
+const partialDetail = await call(`/groups/${sCode}`);
+const bOrder = partialDetail.data.orders.find((o) => o.personName === '阿二');
+check('撤掉其中一樣，其餘照算（回到 90）', bOrder?.total === 90, `total=${bOrder?.total}`);
+check('這個人仍計入人數', bOrder?.counted === true);
+check('被撤掉的品項還留著（看得到自己撤了什麼）', bOrder?.items.length === 2);
+
+// ── 批次 ──────────────────────────────────────────────────────
+console.log('\n批次');
 const bulkNotAdmin = await call(`/groups/${sCode}/orders/status`, {
   method: 'PATCH',
   headers: { 'X-Admin-Token': '00000000-0000-0000-0000-000000000000' },
@@ -412,17 +478,26 @@ check('非發起人不能批次改狀態', bulkNotAdmin.status === 403, `status=
 const bulkOk = await call(`/groups/${sCode}/orders/status`, {
   method: 'PATCH',
   headers: { 'X-Admin-Token': sGroup.data.adminToken },
-  body: { from: 'ordered', to: 'served' },
+  body: { from: 'pending', to: 'ordered' },
 });
-check('批次把已點單改為已到餐', bulkOk.data?.updated === 1, `updated=${bulkOk.data?.updated}`);
+check('批次把這一輪未點單的標為已點單', bulkOk.data?.updated === 1, `updated=${bulkOk.data?.updated}`);
+
+const afterBulk = await call(`/groups/${sCode}`);
+check(
+  '批次不會動到已經到餐的品項',
+  itemsOf(afterBulk, '阿一').find((i) => i.id === itemA.id)?.status === 'served',
+);
 
 const bulkAll = await call(`/groups/${sCode}/orders/status`, {
   method: 'PATCH',
   headers: { 'X-Admin-Token': sGroup.data.adminToken },
   body: { to: 'ordered' },
 });
-check('批次遇到不合法轉移會略過而非整批失敗', bulkAll.status === 200 && bulkAll.data.skipped >= 1,
-  `updated=${bulkAll.data?.updated} skipped=${bulkAll.data?.skipped}`);
+check(
+  '批次遇到不合法轉移會略過而非整批失敗',
+  bulkAll.status === 200 && bulkAll.data.skipped >= 1,
+  `updated=${bulkAll.data?.updated} skipped=${bulkAll.data?.skipped}`,
+);
 
 // 結束點餐後仍可推進狀態（餐點是結束點餐後才陸續送達的）
 await call(`/groups/${sCode}`, {
@@ -430,12 +505,50 @@ await call(`/groups/${sCode}`, {
   headers: { 'X-Admin-Token': sGroup.data.adminToken },
   body: { status: 'closed' },
 });
-const afterClosed = await call(`/orders/${oB.data.orderId}/status`, {
+const afterClosed = await call(`/order-items/${itemB.id}/status`, {
   method: 'PATCH',
-  headers: { 'X-Edit-Token': oB.data.editToken },
   body: { status: 'served' },
 });
 check('結束點餐後仍可標記已到餐', afterClosed.data?.status === 'served', `status=${afterClosed.status}`);
+
+const addAfterClosed = await call(`/orders/${oB.data.orderId}/items`, {
+  method: 'POST',
+  headers: { 'X-Edit-Token': oB.data.editToken },
+  body: { items: [{ name: '關團後想加的', unitPrice: 50, qty: 1 }] },
+});
+check('但結束點餐後不能再加點', addAfterClosed.status === 400, `status=${addAfterClosed.status}`);
+
+// ── 刪除單一品項 ──────────────────────────────────────────────
+console.log('\n刪除單一品項');
+const dGroup = await call('/groups', {
+  method: 'POST',
+  body: { storeId: store.data.id, title: '[smoke] 刪品項團', hostName: '小明' },
+});
+const dOrder = await call(`/groups/${dGroup.data.joinCode}/orders`, {
+  method: 'POST',
+  body: {
+    personName: '阿四',
+    items: [
+      { menuItemId: bento.data.id, qty: 1 },
+      { name: '要被刪掉的', unitPrice: 40, qty: 1 },
+    ],
+  },
+});
+const dDetail = await call(`/groups/${dGroup.data.joinCode}`);
+const doomed = itemsOf(dDetail, '阿四').find((i) => i.name === '要被刪掉的');
+
+const delItemNoToken = await call(`/order-items/${doomed.id}`, { method: 'DELETE' });
+check('沒有 token 不能刪品項', delItemNoToken.status === 403, `status=${delItemNoToken.status}`);
+
+const delItemOk = await call(`/order-items/${doomed.id}`, {
+  method: 'DELETE',
+  headers: { 'X-Edit-Token': dOrder.data.editToken },
+});
+check('本人可以刪單一品項', delItemOk.status === 204, `status=${delItemOk.status}`);
+
+const afterDelItem = await call(`/groups/${dGroup.data.joinCode}`);
+check('刪品項後金額重算（130 - 40 = 90）', afterDelItem.data.orders[0].total === 90, `total=${afterDelItem.data.orders[0].total}`);
+check('其餘品項不受影響', afterDelItem.data.orders[0].items.length === 1);
 
 // ── 截止時間 ──────────────────────────────────────────────────
 console.log('\n截止時間');
@@ -453,6 +566,380 @@ const afterDeadline = await call(`/groups/${expired.data.joinCode}/orders`, {
   body: { personName: '遲到的人', items: [{ menuItemId: bento.data.id, qty: 1 }] },
 });
 check('超過截止時間不能下單', afterDeadline.status === 400, `status=${afterDeadline.status}`);
+
+// ── 登記暱稱與分單 ────────────────────────────────────────────
+//
+// 分單的金額除不盡時，多出來的一元會依品項 id 輪到某個人身上（見 lib/split.js），
+// 所以下面一律驗證「合計」與「該分到幾份」，不對個別的人寫死絕對值。
+console.log('\n登記暱稱與分單');
+const spStore = await call('/stores', { method: 'POST', body: { name: '[smoke] 分單酒吧' } });
+const spWine = await call(`/stores/${spStore.data.id}/menu`, {
+  method: 'POST',
+  body: { name: '一瓶紅酒', price: 100, category: '酒' },
+});
+const spFood = await call(`/stores/${spStore.data.id}/menu`, {
+  method: 'POST',
+  body: { name: '拼盤', price: 90, category: '下酒菜' },
+});
+const spGroup = await call('/groups', {
+  method: 'POST',
+  body: { storeId: spStore.data.id, title: '[smoke] 分單團', hostName: '甲' },
+});
+const spCode = spGroup.data.joinCode;
+const spAdmin = { 'X-Admin-Token': spGroup.data.adminToken };
+
+const reg甲 = await call(`/groups/${spCode}/orders`, { method: 'POST', body: { personName: '甲' } });
+check('可以只登記暱稱、不點東西', reg甲.status === 201 && reg甲.data.orderId, `status=${reg甲.status}`);
+const reg乙 = await call(`/groups/${spCode}/orders`, {
+  method: 'POST',
+  body: { personName: '乙', items: [] },
+});
+const reg丙 = await call(`/groups/${spCode}/orders`, {
+  method: 'POST',
+  body: { personName: '丙', items: [] },
+});
+check(
+  '同一團不能重複登記同一個暱稱',
+  (await call(`/groups/${spCode}/orders`, { method: 'POST', body: { personName: '甲' } })).status === 409,
+);
+
+let spSnap = await call(`/groups/${spCode}`);
+check('只登記還沒點的人不算人頭', spSnap.data.summary.peopleCount === 0);
+check('但算在參與者裡', spSnap.data.summary.participantCount === 3);
+
+// 全部平分
+await call(`/orders/${reg甲.data.orderId}/items`, {
+  method: 'POST',
+  headers: { 'X-Edit-Token': reg甲.data.editToken },
+  body: { items: [{ menuItemId: spWine.data.id, qty: 1, shareScope: 'all', note: '常溫' }] },
+});
+spSnap = await call(`/groups/${spCode}`);
+const payerOf = (name) => spSnap.data.summary.byPerson.find((p) => p.personName === name);
+check(
+  '全部平分：100 拆成 34/33/33',
+  [payerOf('甲').payable, payerOf('乙').payable, payerOf('丙').payable].sort().join(',') === '33,33,34',
+  JSON.stringify(spSnap.data.summary.byPerson.map((p) => [p.personName, p.payable])),
+);
+check('分擔總和等於總額（零頭不會漏掉）', spSnap.data.summary.split.total === spSnap.data.summary.grandTotal);
+check('點的人自己的單仍是 100', payerOf('甲').ownTotal === 100);
+check('分擔到的人現在算人頭了', spSnap.data.summary.peopleCount === 3);
+check('品項備註存得下來', spSnap.data.orders[0].items[0].note === '常溫');
+check('分單品項進入一覽表', spSnap.data.summary.split.items[0]?.payers.length === 3);
+
+// 指定的人
+await call(`/orders/${reg乙.data.orderId}/items`, {
+  method: 'POST',
+  headers: { 'X-Edit-Token': reg乙.data.editToken },
+  body: {
+    items: [
+      { menuItemId: spFood.data.id, qty: 1, shareScope: 'custom', sharedWith: [reg丙.data.orderId] },
+    ],
+  },
+});
+spSnap = await call(`/groups/${spCode}`);
+check('指定分單：90 由乙丙對半，乙自己那份是 45', payerOf('乙').ownPayable === 45, `${payerOf('乙').ownPayable}`);
+check(
+  '三人合計等於總額 190',
+  payerOf('甲').payable + payerOf('乙').payable + payerOf('丙').payable === 190,
+);
+
+check(
+  '不能把品項分給不在這一團的人',
+  (
+    await call(`/orders/${reg乙.data.orderId}/items`, {
+      method: 'POST',
+      headers: { 'X-Edit-Token': reg乙.data.editToken },
+      body: {
+        items: [
+          {
+            menuItemId: spFood.data.id,
+            qty: 1,
+            shareScope: 'custom',
+            sharedWith: ['00000000-0000-0000-0000-000000000000'],
+          },
+        ],
+      },
+    })
+  ).status === 400,
+);
+
+// 發起人代改別人的單一品項
+const foodItem = spSnap.data.orders
+  .find((o) => o.personName === '乙')
+  .items.find((i) => i.name === '拼盤');
+const hostPatch = await call(`/order-items/${foodItem.id}`, {
+  method: 'PATCH',
+  headers: spAdmin,
+  body: { qty: 2, note: '不要辣', name: '拼盤', unitPrice: 90 },
+});
+check('發起人可以改別人的品項', hostPatch.status === 200, JSON.stringify(hostPatch.data));
+check('品項備註寫得進去', hostPatch.data.item.note === '不要辣');
+check('值沒變就不會被踢出菜單', hostPatch.data.item.isCustom === false);
+check('分單設定不受影響', hostPatch.data.item.shareScope === 'custom');
+check(
+  '真的改了價格才脫離菜單',
+  (
+    await call(`/order-items/${foodItem.id}`, {
+      method: 'PATCH',
+      headers: spAdmin,
+      body: { unitPrice: 110 },
+    })
+  ).data.item.isCustom === true,
+);
+
+// 撤單與刪人
+const wineItem = spSnap.data.orders.find((o) => o.personName === '甲').items[0];
+await call(`/order-items/${wineItem.id}/status`, { method: 'PATCH', body: { status: 'cancelled' } });
+spSnap = await call(`/groups/${spCode}`);
+check('撤掉的分單品項不跟任何人收錢', payerOf('甲').payable === 0);
+check('撤單後總和仍守恆', spSnap.data.summary.split.total === spSnap.data.summary.grandTotal);
+
+await call(`/orders/${reg丙.data.orderId}`, { method: 'DELETE', headers: spAdmin });
+spSnap = await call(`/groups/${spCode}`);
+check('被分擔的人整張單被刪掉後，金額仍守恆', spSnap.data.summary.split.total === spSnap.data.summary.grandTotal);
+
+check(
+  '關團後發起人仍可修改品項（收拾殘局）',
+  (await call(`/groups/${spCode}`, { method: 'PATCH', headers: spAdmin, body: { status: 'closed' } }))
+    .status === 200 &&
+    (
+      await call(`/order-items/${foodItem.id}`, {
+        method: 'PATCH',
+        headers: spAdmin,
+        body: { note: '結帳時補的備註' },
+      })
+    ).status === 200,
+);
+
+// ── 點單後就不能再改品名與數量 ────────────────────────────────
+//
+// 跟店家點過之後，店家手上那張單就定了，本人再改只會讓兩邊對不起來。
+// 只鎖品名與數量：價格常常是點完才知道的，備註與分單也多半在結帳當下才喬。
+console.log('\n點單後就不能再改品名與數量');
+const lkGroup = await call('/groups', {
+  method: 'POST',
+  body: { storeId: store.data.id, title: '[smoke] 鎖定團', hostName: '小明' },
+});
+const lkCode = lkGroup.data.joinCode;
+const lkAdmin = { 'X-Admin-Token': lkGroup.data.adminToken };
+const lkOrder = await call(`/groups/${lkCode}/orders`, {
+  method: 'POST',
+  body: { personName: '阿鎖', items: [{ menuItemId: bento.data.id, qty: 1 }] },
+});
+const lkEdit = { 'X-Edit-Token': lkOrder.data.editToken };
+const lkItem = (await call(`/groups/${lkCode}`)).data.orders[0].items[0];
+
+check(
+  '未點單時本人可以改數量',
+  (await call(`/order-items/${lkItem.id}`, { method: 'PATCH', headers: lkEdit, body: { qty: 2 } }))
+    .status === 200,
+);
+
+await call(`/order-items/${lkItem.id}/status`, { method: 'PATCH', body: { status: 'ordered' } });
+
+const lkQty = await call(`/order-items/${lkItem.id}`, {
+  method: 'PATCH',
+  headers: lkEdit,
+  body: { qty: 5 },
+});
+check('已點單後本人不能改數量', lkQty.status === 400, `status=${lkQty.status}`);
+
+const lkName = await call(`/order-items/${lkItem.id}`, {
+  method: 'PATCH',
+  headers: lkEdit,
+  body: { name: '偷改的品名' },
+});
+check('已點單後本人不能改品名', lkName.status === 400, `status=${lkName.status}`);
+
+const lkResend = await call(`/order-items/${lkItem.id}`, {
+  method: 'PATCH',
+  headers: lkEdit,
+  body: { name: lkItem.name, qty: 2, note: '少辣' },
+});
+check(
+  '原樣送回品名數量不算修改（編輯表單會整份送出）',
+  lkResend.status === 200 && lkResend.data.item.note === '少辣',
+  `status=${lkResend.status}`,
+);
+
+check(
+  '已點單後本人仍可補價格（自填品項常常是後來才知道多少錢）',
+  (
+    await call(`/order-items/${lkItem.id}`, {
+      method: 'PATCH',
+      headers: lkEdit,
+      body: { unitPrice: 95 },
+    })
+  ).status === 200,
+);
+
+const lkDel = await call(`/order-items/${lkItem.id}`, { method: 'DELETE', headers: lkEdit });
+check('已點單後本人不能直接刪品項（要走撤單）', lkDel.status === 400, `status=${lkDel.status}`);
+
+const lkDelOrder = await call(`/orders/${lkOrder.data.orderId}`, { method: 'DELETE', headers: lkEdit });
+check(
+  '單裡有已點單的品項時本人不能整張刪掉',
+  lkDelOrder.status === 400,
+  `status=${lkDelOrder.status}`,
+);
+
+check(
+  '發起人不受此限（收拾殘局是他的事）',
+  (await call(`/order-items/${lkItem.id}`, { method: 'PATCH', headers: lkAdmin, body: { qty: 7 } }))
+    .status === 200,
+);
+
+check(
+  '本人仍可繼續加點（要多點就另外加一筆）',
+  (
+    await call(`/orders/${lkOrder.data.orderId}/items`, {
+      method: 'POST',
+      headers: lkEdit,
+      body: { items: [{ menuItemId: bento.data.id, qty: 1 }] },
+    })
+  ).status === 201,
+);
+
+// ── 管理代碼與管理者 ──────────────────────────────────────────
+//
+// 管理者能改任何人的單、批次推進度，但關團、刪團與指派管理者仍然只有發起人做得到。
+console.log('\n管理代碼與管理者');
+const mgGroup = await call('/groups', {
+  method: 'POST',
+  body: { storeId: store.data.id, title: '[smoke] 管理團', hostName: '小明' },
+});
+const mgCode = mgGroup.data.joinCode;
+const mgAdmin = { 'X-Admin-Token': mgGroup.data.adminToken };
+const mgManage = { 'X-Manage-Code': mgGroup.data.manageCode };
+
+check(
+  '開團回傳 8 碼管理代碼',
+  /^[A-Z2-9]{8}$/.test(mgGroup.data.manageCode || ''),
+  mgGroup.data.manageCode,
+);
+check('管理代碼與團號不同', mgGroup.data.manageCode !== mgCode);
+
+check(
+  '沒帶憑證讀團看不到管理代碼',
+  (await call(`/groups/${mgCode}`)).data.group.manageCode === undefined,
+);
+check(
+  '發起人讀團才拿得回管理代碼',
+  (await call(`/groups/${mgCode}`, { headers: mgAdmin })).data.group.manageCode ===
+    mgGroup.data.manageCode,
+);
+
+check(
+  '打錯管理代碼會被擋下',
+  (await call(`/groups/${mgCode}/manage-code`, { method: 'POST', body: { manageCode: 'WRONGONE' } }))
+    .status === 403,
+);
+check(
+  '管理代碼不分大小寫',
+  (
+    await call(`/groups/${mgCode}/manage-code`, {
+      method: 'POST',
+      body: { manageCode: mgGroup.data.manageCode.toLowerCase() },
+    })
+  ).status === 200,
+);
+
+const mgVictim = await call(`/groups/${mgCode}/orders`, {
+  method: 'POST',
+  body: { personName: '被改的人', items: [{ menuItemId: bento.data.id, qty: 1 }] },
+});
+const mgHelper = await call(`/groups/${mgCode}/orders`, {
+  method: 'POST',
+  body: { personName: '幫忙的人', items: [{ menuItemId: bento.data.id, qty: 1 }] },
+});
+const mgVictimItem = (await call(`/groups/${mgCode}`)).data.orders.find(
+  (o) => o.personName === '被改的人',
+).items[0];
+
+check(
+  '持有管理代碼就能改別人的品項',
+  (await call(`/order-items/${mgVictimItem.id}`, { method: 'PATCH', headers: mgManage, body: { qty: 3 } }))
+    .status === 200,
+);
+check(
+  '持有管理代碼可以批次改狀態',
+  (
+    await call(`/groups/${mgCode}/orders/status`, {
+      method: 'PATCH',
+      headers: mgManage,
+      body: { from: 'pending', to: 'ordered' },
+    })
+  ).data?.updated === 2,
+);
+check(
+  '管理代碼改得動已點單的品名數量（他就是來收拾殘局的）',
+  (await call(`/order-items/${mgVictimItem.id}`, { method: 'PATCH', headers: mgManage, body: { qty: 1 } }))
+    .status === 200,
+);
+check(
+  '但管理者不能關團',
+  (await call(`/groups/${mgCode}`, { method: 'PATCH', headers: mgManage, body: { status: 'closed' } }))
+    .status === 403,
+);
+check(
+  '管理者也不能刪團',
+  (await call(`/groups/${mgCode}`, { method: 'DELETE', headers: mgManage })).status === 403,
+);
+
+// 指派特定參與者當管理者：他用自己原本的 editToken 就有權限
+const mgHelperEdit = { 'X-Edit-Token': mgHelper.data.editToken };
+check(
+  '還沒被指派前，改不動別人的單',
+  (await call(`/order-items/${mgVictimItem.id}`, { method: 'PATCH', headers: mgHelperEdit, body: { qty: 4 } }))
+    .status === 403,
+);
+check(
+  '不是發起人不能指派管理者',
+  (
+    await call(`/orders/${mgHelper.data.orderId}/manager`, {
+      method: 'PATCH',
+      headers: mgManage,
+      body: { isManager: true },
+    })
+  ).status === 403,
+);
+
+const mgGrant = await call(`/orders/${mgHelper.data.orderId}/manager`, {
+  method: 'PATCH',
+  headers: mgAdmin,
+  body: { isManager: true },
+});
+check('發起人可以指派管理者', mgGrant.status === 200 && mgGrant.data.isManager === true);
+check(
+  '被指派後清單看得出誰是管理者',
+  (await call(`/groups/${mgCode}`)).data.orders.find((o) => o.personName === '幫忙的人')
+    ?.isManager === true,
+);
+check(
+  '被指派的人用自己的 editToken 就能改別人的單',
+  (await call(`/order-items/${mgVictimItem.id}`, { method: 'PATCH', headers: mgHelperEdit, body: { qty: 4 } }))
+    .status === 200,
+);
+check(
+  '但他仍然不能刪團',
+  (await call(`/groups/${mgCode}`, { method: 'DELETE', headers: mgHelperEdit })).status === 403,
+);
+
+await call(`/orders/${mgHelper.data.orderId}/manager`, {
+  method: 'PATCH',
+  headers: mgAdmin,
+  body: { isManager: false },
+});
+check(
+  '收回管理權後就改不動別人的單了',
+  (await call(`/order-items/${mgVictimItem.id}`, { method: 'PATCH', headers: mgHelperEdit, body: { qty: 2 } }))
+    .status === 403,
+);
+
+check(
+  '管理代碼不會出現在沒帶憑證的完整快照裡',
+  !JSON.stringify(await call(`/groups/${mgCode}`)).includes(mgGroup.data.manageCode),
+);
 
 // ── 收尾 ──────────────────────────────────────────────────────
 await cleanup();

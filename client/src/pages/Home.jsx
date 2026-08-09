@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Link as RouterLink, useNavigate } from 'react-router-dom';
 import {
   Alert,
@@ -9,12 +9,14 @@ import {
   Chip,
   IconButton,
   Link,
+  Snackbar,
   Stack,
   TextField,
   Typography,
 } from '@mui/material';
 import CloseIcon from '@mui/icons-material/Close';
 import AddIcon from '@mui/icons-material/Add';
+import { api } from '../lib/api.js';
 import { storage } from '../lib/storage.js';
 import { Layout, Header } from '../components/ui.jsx';
 
@@ -34,6 +36,53 @@ export default function Home() {
   const [code, setCode] = useState('');
   const [error, setError] = useState('');
   const [groups, setGroups] = useState(() => storage.listGroups());
+  const [toast, setToast] = useState('');
+
+  /**
+   * 本機清單只是快取：團可能已經被發起人刪掉，標題或狀態也可能變了。
+   * 進首頁時逐團問一次伺服器，刪掉的移除、還在的順便更新。
+   *
+   * 只有伺服器明確回 404 才移除。離線或伺服器出錯時一律保留，
+   * 否則一次斷網就會把整份參與紀錄連同憑證清掉，救不回來。
+   */
+  useEffect(() => {
+    const codes = storage.listGroups().map((group) => group.joinCode);
+    if (codes.length === 0) return undefined;
+
+    let cancelled = false;
+
+    (async () => {
+      const entries = await Promise.all(
+        codes.map(async (code) => {
+          try {
+            const { group } = await api.getGroup(code);
+            return [
+              code,
+              {
+                title: group.title,
+                storeName: group.store.name,
+                createdAt: group.createdAt,
+                status: group.status,
+              },
+            ];
+          } catch (err) {
+            return [code, err.status === 404 ? null : undefined];
+          }
+        }),
+      );
+      if (cancelled) return;
+
+      const updates = Object.fromEntries(entries.filter(([, value]) => value !== undefined));
+      const goneCount = Object.values(updates).filter((value) => value === null).length;
+
+      setGroups(storage.reconcileGroups(updates));
+      if (goneCount > 0) setToast(`已移除 ${goneCount} 個不存在的攤`);
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   function forget(event, joinCode) {
     event.preventDefault();
@@ -53,7 +102,7 @@ export default function Home() {
   }
 
   return (
-    <Layout header={<Header title="一起點" subtitle="開一攤，大家各自點餐" />}>
+    <Layout header={<Header title="聚會點餐機" subtitle="開一攤，大家各自點餐" />}>
       <Stack spacing={3} sx={{ px: 2, py: 2.5 }}>
         <Button
           component={RouterLink}
@@ -155,6 +204,14 @@ export default function Home() {
           管理店家與菜單
         </Link>
       </Stack>
+
+      <Snackbar
+        open={Boolean(toast)}
+        autoHideDuration={3000}
+        onClose={() => setToast('')}
+        message={toast}
+        anchorOrigin={{ vertical: 'bottom', horizontal: 'center' }}
+      />
     </Layout>
   );
 }

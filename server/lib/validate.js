@@ -3,7 +3,27 @@ import { badRequest } from './errors.js';
 import { ORDER_STATUSES } from './orderStatus.js';
 
 const name = z.string().trim().min(1, '名稱不可為空').max(50, '名稱過長');
-const money = z.number().int('金額必須是整數').min(0, '金額不可為負').max(9999, '金額上限 9999');
+// 上限放到 20 萬：酒吧的整支酒與套餐（例如香檳王一支 18,000）會超過四位數，
+// 舊的 9999 上限會讓這些品項無法在管理頁面新增或修改
+const money = z.number().int('金額必須是整數').min(0, '金額不可為負').max(200000, '金額上限 200000');
+
+/** 這一樣的要求（不要香菜、去冰）。整張單的通則另有 orders.note */
+const itemNote = z.string().trim().max(100, '備註過長').optional().nullable();
+
+/**
+ * 分單：誰要一起付這一樣。
+ *
+ *   owner   只有點的人付（預設）
+ *   all     全團平分，人在計算當下才解析
+ *   custom  點的人 ＋ sharedWith 列出的人
+ *
+ * sharedWith 只列「其他人」，不含點的人自己——他必然要付，而且下單當下
+ * 那張單的 id 還不存在。見 server/lib/split.js。
+ */
+const shareFields = {
+  shareScope: z.enum(['owner', 'all', 'custom']).optional(),
+  sharedWith: z.array(z.string().uuid('分單對象格式錯誤')).max(50, '分單人數過多').optional(),
+};
 
 /**
  * 訂單品項：兩種形態
@@ -14,6 +34,8 @@ export const orderItemSchema = z.union([
   z.object({
     menuItemId: z.coerce.number().int().positive(),
     qty: z.number().int().min(1).max(99),
+    note: itemNote,
+    ...shareFields,
   }),
   z.object({
     menuItemId: z.null().optional(),
@@ -22,14 +44,53 @@ export const orderItemSchema = z.union([
     qty: z.number().int().min(1).max(99),
     // 自填品項時使用者也可能不確定價格
     priceUncertain: z.boolean().optional(),
+    note: itemNote,
+    ...shareFields,
   }),
 ]);
 
+/**
+ * 下單。
+ *
+ * items 允許為空：第一次進團要先登記暱稱，登記出來的就是一張還沒點東西的單。
+ * 有了單才有身分，別人才選得到你來分單，你也才不必每次重打名字。
+ */
 export const createOrderSchema = z.object({
   personName: z.string().trim().min(1, '請填寫你的名字').max(20, '名字過長'),
   note: z.string().trim().max(200).optional().nullable(),
-  items: z.array(orderItemSchema).min(1, '至少要點一樣').max(30, '品項過多'),
+  items: z.array(orderItemSchema).max(30, '品項過多').optional().default([]),
 });
+
+/** 加點：往既有的單追加品項，不影響已經在單上的東西 */
+export const addOrderItemsSchema = z.object({
+  items: z.array(orderItemSchema).min(1, '至少要點一樣').max(30, '一次加太多了'),
+});
+
+/** 一張單累積下來的品項上限，避免無限加點把彙總撐爆 */
+export const MAX_ITEMS_PER_ORDER = 60;
+
+export const patchOrderSchema = z
+  .object({
+    personName: z.string().trim().min(1, '請填寫你的名字').max(20, '名字過長').optional(),
+    note: z.string().trim().max(200).nullable().optional(),
+  })
+  .refine((value) => Object.keys(value).length > 0, '沒有要修改的欄位');
+
+/**
+ * 改單一品項。
+ * 只改 qty、備註或分單會保留與菜單的連結；一旦動到名稱或價格，這一列就會轉成
+ * 自填品項（菜單品項的名稱與價格必須與菜單一致，見 pricing.js 的信任模型）。
+ */
+export const patchOrderItemSchema = z
+  .object({
+    name: name.optional(),
+    unitPrice: money.optional(),
+    priceUncertain: z.boolean().optional(),
+    qty: z.number().int().min(1).max(99).optional(),
+    note: itemNote,
+    ...shareFields,
+  })
+  .refine((value) => Object.keys(value).length > 0, '沒有要修改的欄位');
 
 export const createGroupSchema = z.object({
   storeId: z.coerce.number().int().positive(),
@@ -45,6 +106,23 @@ export const patchGroupSchema = z.object({
 
 export const orderStatusSchema = z.object({
   status: z.enum(ORDER_STATUSES),
+});
+
+/**
+ * 驗證管理代碼。
+ * 大小寫與前後空白一律正規化——這組代碼是用嘴巴念、用手打進去的。
+ */
+export const manageCodeSchema = z.object({
+  manageCode: z
+    .string()
+    .trim()
+    .transform((value) => value.toUpperCase())
+    .pipe(z.string().min(4, '請輸入完整的管理代碼').max(16, '管理代碼過長')),
+});
+
+/** 發起人指派／取消某個參與者的管理權 */
+export const patchOrderManagerSchema = z.object({
+  isManager: z.boolean(),
 });
 
 /** 發起人批次改狀態，例如跟店家點完後把整桌標成「已點單」 */
