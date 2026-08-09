@@ -15,6 +15,7 @@ import {
   Typography,
 } from '@mui/material';
 import { api } from '../lib/api.js';
+import { keys, useAppMutation } from '../lib/queries.js';
 import { ItemTags, priceText } from './ui.jsx';
 import ItemStatusChip from './ItemStatusChip.jsx';
 import { STATUS_ORDER, statusColor, statusLabel } from '../lib/orderStatus.js';
@@ -39,11 +40,25 @@ export default function GroupManage({
   canManage,
   canGrant,
   myOrderId,
-  onChanged,
 }) {
   const [toast, setToast] = useState('');
   const [error, setError] = useState('');
-  const [busy, setBusy] = useState(false);
+
+  const bulk = useAppMutation({
+    mutationFn: ({ from, to }) => api.bulkSetStatus(joinCode, { from, to }, tokens),
+    invalidates: [keys.group(joinCode)],
+    onSuccess: (result) => setToast(result.message),
+    onError: (err) => setError(err.message),
+  });
+
+  const changeRole = useAppMutation({
+    mutationFn: ({ order, role }) => api.setOrderRole(order.id, role, tokens),
+    invalidates: [keys.group(joinCode)],
+    onSuccess: (_result, { order, role }) => setToast(`${order.personName} 現在是${roleLabel(role)}`),
+    onError: (err) => setError(err.message),
+  });
+
+  const busy = bulk.isPending || changeRole.isPending;
 
   const counts = summary.statusCounts ?? {};
   const pendingCount = counts.pending ?? 0;
@@ -65,35 +80,12 @@ export default function GroupManage({
     return [...groups].filter(([, items]) => items.length > 0);
   }, [orders]);
 
-  async function bulk(from, to) {
-    setBusy(true);
-    setError('');
-    try {
-      const result = await api.bulkSetStatus(joinCode, { from, to }, tokens);
-      setToast(result.message);
-      await onChanged();
-    } catch (err) {
-      setError(err.message);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function changeRole(order, role) {
-    setBusy(true);
-    setError('');
-    try {
-      await api.setOrderRole(order.id, role, tokens);
-      setToast(`${order.personName} 現在是${roleLabel(role)}`);
-      await onChanged();
-    } catch (err) {
-      setError(err.message);
-    } finally {
-      setBusy(false);
-    }
-  }
-
   if (!canManage && !canGrant) return null;
+
+  const runBulk = (from, to) => {
+    setError('');
+    bulk.mutate({ from, to });
+  };
 
   return (
     <Stack spacing={2} sx={{ px: 2, pt: 2.5 }}>
@@ -148,7 +140,7 @@ export default function GroupManage({
                         {/* 批次不是萬用的：只有這一份還沒到、或這一樣客人反悔了，
                             要動的就是單獨這一列 */}
                         <Box sx={{ mt: 0.25 }}>
-                          <ItemStatusChip item={item} onChanged={onChanged} onError={setError} />
+                          <ItemStatusChip joinCode={joinCode} item={item} onError={setError} />
                         </Box>
                       </Box>
                       <Typography variant="body2" className="tnum" sx={{ mx: 1 }}>
@@ -179,7 +171,7 @@ export default function GroupManage({
                 size="small"
                 variant="contained"
                 disabled={busy || pendingCount === 0}
-                onClick={() => bulk('pending', 'ordered')}
+                onClick={() => runBulk('pending', 'ordered')}
               >
                 全部標為已點單{pendingCount > 0 && `（${pendingCount}）`}
               </Button>
@@ -188,7 +180,7 @@ export default function GroupManage({
                 variant="outlined"
                 color="success"
                 disabled={busy || orderedCount === 0}
-                onClick={() => bulk('ordered', 'served')}
+                onClick={() => runBulk('ordered', 'served')}
               >
                 全部標為已到餐{orderedCount > 0 && `（${orderedCount}）`}
               </Button>
@@ -198,7 +190,7 @@ export default function GroupManage({
                   variant="outlined"
                   color="error"
                   disabled={busy}
-                  onClick={() => bulk('cancel_requested', 'cancelled')}
+                  onClick={() => runBulk('cancel_requested', 'cancelled')}
                 >
                   確認撤單（{cancelRequestedCount}）
                 </Button>
@@ -251,7 +243,10 @@ export default function GroupManage({
                       value={isMe && isHost ? 'admin' : (order.role ?? 'participant')}
                       // 發起人的權限來自 admin_token 而不是這張單，改它沒有意義
                       disabled={busy || (isMe && isHost)}
-                      onChange={(e) => changeRole(order, e.target.value)}
+                      onChange={(e) => {
+                        setError('');
+                        changeRole.mutate({ order, role: e.target.value });
+                      }}
                       sx={{ width: 150, flexShrink: 0 }}
                       slotProps={{ htmlInput: { 'aria-label': `${order.personName} 的權限` } }}
                     >

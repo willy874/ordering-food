@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate } from '@tanstack/react-router';
+import { useMutation, useQuery } from '@tanstack/react-query';
 import {
   Alert,
   AlertTitle,
@@ -14,8 +15,9 @@ import {
   Typography,
 } from '@mui/material';
 import { api } from '../lib/api.js';
+import { similarGroupsQuery, storesQuery } from '../lib/queries.js';
 import { storage } from '../lib/storage.js';
-import { Layout, Header, BottomBar, NameInput, Empty } from '../components/ui.jsx';
+import { Layout, Header, BottomBar, NameInput } from '../components/ui.jsx';
 
 /** 預設截止時間：今天 11:30，若已過則設為明天 */
 function defaultDeadline() {
@@ -27,70 +29,67 @@ function defaultDeadline() {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
+/** 邊打字邊查同名的攤太吵，等手停下來再問 */
+function useDebounced(value, delay) {
+  const [debounced, setDebounced] = useState(value);
+  useEffect(() => {
+    const timer = setTimeout(() => setDebounced(value), delay);
+    return () => clearTimeout(timer);
+  }, [value, delay]);
+  return debounced;
+}
+
 export default function NewGroup() {
   const navigate = useNavigate();
-  const [stores, setStores] = useState(null);
+  const { data: stores = [] } = useQuery(storesQuery());
+
   const [storeId, setStoreId] = useState('');
   const [title, setTitle] = useState('');
   const [hostName, setHostName] = useState(storage.getName());
   const [useDeadline, setUseDeadline] = useState(false);
   const [deadline, setDeadline] = useState(defaultDeadline());
   const [error, setError] = useState('');
-  const [saving, setSaving] = useState(false);
-  const [similar, setSimilar] = useState([]);
 
   useEffect(() => {
-    api
-      .listStores()
-      .then((list) => {
-        setStores(list);
-        if (list.length) setStoreId(String(list[0].id));
-      })
-      .catch((err) => setError(err.message));
-  }, []);
+    if (!storeId && stores.length > 0) setStoreId(String(stores[0].id));
+  }, [stores, storeId]);
 
   // 同店家、同名且仍在收單中的攤，事先提醒，避免大家分散在兩攤
-  useEffect(() => {
-    const trimmed = title.trim();
-    if (!storeId || !trimmed) {
-      setSimilar([]);
-      return;
-    }
-    const timer = setTimeout(() => {
-      api.findSimilarGroups(storeId, trimmed).then(setSimilar).catch(() => setSimilar([]));
-    }, 400);
-    return () => clearTimeout(timer);
-  }, [storeId, title]);
+  const debouncedTitle = useDebounced(title.trim(), 400);
+  const { data: similar = [] } = useQuery(similarGroupsQuery(storeId, debouncedTitle));
 
-  async function submit(event) {
+  const create = useMutation({
+    mutationFn: (body) => api.createGroup(body),
+    onError: (err) => setError(err.message),
+  });
+
+  function submit(event) {
     event.preventDefault();
     setError('');
-    setSaving(true);
-    try {
-      const store = stores.find((s) => String(s.id) === String(storeId));
-      const finalTitle = title.trim() || `${store.name}`;
-      const created = await api.createGroup({
+
+    const store = stores.find((s) => String(s.id) === String(storeId));
+    if (!store) return setError('請先選一家店');
+    const finalTitle = title.trim() || store.name;
+
+    return create.mutate(
+      {
         storeId: Number(storeId),
         title: finalTitle,
         hostName: hostName.trim(),
         deadlineAt: useDeadline && deadline ? new Date(deadline).toISOString() : null,
-      });
-
-      storage.setAdminToken(created.joinCode, created.adminToken);
-      storage.rememberName(hostName.trim());
-      storage.rememberGroup({ joinCode: created.joinCode, title: finalTitle, storeName: store.name });
-      navigate(`/g/${created.joinCode}`, { replace: true });
-    } catch (err) {
-      setError(err.message);
-      setSaving(false);
-    }
-  }
-
-  if (stores === null) {
-    return (
-      <Layout header={<Header title="開始一攤" back="/" />}>
-        <Empty>載入中…</Empty>
-      </Layout>
+      },
+      {
+        onSuccess: (created) => {
+          storage.setAdminToken(created.joinCode, created.adminToken);
+          storage.rememberName(hostName.trim());
+          storage.rememberGroup({
+            joinCode: created.joinCode,
+            title: finalTitle,
+            storeName: store.name,
+          });
+          navigate({ to: '/g/$joinCode', params: { joinCode: created.joinCode }, replace: true });
+        },
+      },
     );
   }
 
@@ -99,7 +98,7 @@ export default function NewGroup() {
       <Layout header={<Header title="開始一攤" back="/" />}>
         <Stack spacing={2} sx={{ px: 2, py: 3 }}>
           <Alert severity="warning">還沒有任何店家，請先建立店家與菜單。</Alert>
-          <Button variant="contained" onClick={() => navigate('/stores')}>
+          <Button variant="contained" onClick={() => navigate({ to: '/stores' })}>
             去建立店家
           </Button>
         </Stack>
@@ -113,8 +112,13 @@ export default function NewGroup() {
         header={<Header title="開始一攤" back="/" />}
         footer={
           <BottomBar>
-            <Button type="submit" variant="contained" fullWidth disabled={saving || !hostName.trim()}>
-              {saving ? '建立中…' : '建立並取得代碼'}
+            <Button
+              type="submit"
+              variant="contained"
+              fullWidth
+              disabled={create.isPending || !hostName.trim()}
+            >
+              {create.isPending ? '建立中…' : '建立並取得代碼'}
             </Button>
           </BottomBar>
         }
@@ -143,7 +147,12 @@ export default function NewGroup() {
               <Stack spacing={1} sx={{ mt: 1 }}>
                 {similar.map((group) => (
                   <Card key={group.joinCode}>
-                    <CardActionArea onClick={() => navigate(`/g/${group.joinCode}`)} sx={{ px: 1.5, py: 1 }}>
+                    <CardActionArea
+                      onClick={() =>
+                        navigate({ to: '/g/$joinCode', params: { joinCode: group.joinCode } })
+                      }
+                      sx={{ px: 1.5, py: 1 }}
+                    >
                       <Stack direction="row" alignItems="center" spacing={1}>
                         <Box sx={{ minWidth: 0, flex: 1 }}>
                           <Typography variant="body2" noWrap>

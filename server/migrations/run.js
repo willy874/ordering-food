@@ -3,6 +3,13 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { pool } from '../db.js';
 
+/**
+ * Migration 一律走原始的 pg client，不經過 Drizzle。
+ *
+ * 這裡跑的是任意 DDL，包含 Drizzle schema 還不知道（或刻意不描述）的東西，
+ * 例如 _migrations 這張表、plpgsql 函式與觸發器。結構的來源是這些 .sql 檔，
+ * server/schema.js 只是套用完之後的描述——順序反過來會很難收拾。
+ */
 const dir = path.dirname(fileURLToPath(import.meta.url));
 
 await pool.query(`

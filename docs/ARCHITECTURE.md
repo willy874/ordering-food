@@ -12,9 +12,9 @@
 
 | 你的需求 | 設計對應 |
 |---|---|
-| React 前端 | Vite + React + Tailwind |
+| React 前端 | Vite + React 19 + MUI，純 CSR（TanStack Router／Query） |
 | 手機版為主，最大 500px 置中 | 見 §8 版面約束 |
-| Node.js 後端 | Node 22 + Express + `pg` |
+| Node.js 後端 | Node 22 + Express + Drizzle ORM（`pg` 驅動） |
 | 可選多個店家不同菜單 | `stores` ← `menu_items`，開團時綁定店家 |
 | 可自填菜名和價格 | `order_items.menu_item_id` 可為 null，見 §6 |
 | 點單附上自己的名字 | `orders.person_name` |
@@ -35,6 +35,27 @@
 ```
 
 **為什麼是單一服務**：前後端同源，省掉 CORS 設定與第二個服務的維運。輕量專案不需要拆。
+
+### 後端分層
+
+`/api/*` 底下一律走同一條路：
+
+```
+routes/         路徑 → controller 的對照表，不放任何邏輯
+   ↓
+controllers/    唯一碰得到 req／res 的一層。zod 驗證 body、把 header 上的
+                三組憑證讀成普通物件、把路徑參數轉成 id、決定狀態碼
+   ↓
+services/       商業規則的所在：權限、狀態轉移、截止時間、transaction 邊界。
+                回傳的是可以直接送出的 DTO，不含 Drizzle row
+   ↓
+repositories/   全部的 Drizzle 查詢。第一個參數一律是 executor（db 或 tx），
+                同一份查詢在交易內外共用。找不到回 null，不丟 HttpError
+```
+
+`lib/` 在這條線之外：純函式，不碰資料庫也不碰 Express（狀態機、分單、計價、序列化、zod schema）。需要查資料庫的判斷因此被切成兩半——規則留在 `lib/`，查詢那一步放進 service。身分判定是最明顯的例子：`lib/roles.js` 的 `evaluateActor` 只做「有了憑證與被指派的角色之後怎麼判」，`services/permissionService.js` 負責去把那個角色查出來。
+
+**為什麼值得拆。** 原本三支 `routes/*.js` 各自四百行，SQL、權限判斷與 HTTP 混在同一個 handler 裡；`POST /groups/:joinCode/orders` 與 `POST /orders/:orderId/items` 是同一套計價與分單驗證，卻只能靠 `lib/pricing.js` 收留那些「其實需要資料庫」的 helper。拆開之後每一層只有一種理由會改：換 ORM 只動 repository，改權限只動 service，改 API 形狀只動 controller。分層前後 `npm run smoke` 的 158 項行為完全不變。
 
 **冷啟動可以接受**：Zeabur 免費方案的 Node 服務會休眠。先前評估餐廳現場點餐時我判定不可接受（客人站在櫃檯等），但團購的使用節奏是「中午前陸續下單」，第一個人多等三秒無感。這是本情境相對寬鬆的地方。
 
@@ -183,7 +204,7 @@ create index idx_shares_order      on order_item_shares (order_id);
 
 **設計決策**
 
-**狀態屬於品項，不屬於訂單。** 聚會是一輪一輪點的：先點的已經到餐時，後加的還沒跟店家開口，整張單根本沒有單一狀態可言。`orders` 因此沒有 status 欄位，整張單的狀態一律由品項推導（取最落後的那一項，見 `lib/orderStatus.js` 的 `rollupStatus`）。`orders.total` 是快取，唯一的事實來源是 `order_items`，任何品項異動都要經過 `lib/pricing.js` 的 `refreshOrderTotal` 重算。
+**狀態屬於品項，不屬於訂單。** 聚會是一輪一輪點的：先點的已經到餐時，後加的還沒跟店家開口，整張單根本沒有單一狀態可言。`orders` 因此沒有 status 欄位，整張單的狀態一律由品項推導（取最落後的那一項，見 `lib/orderStatus.js` 的 `rollupStatus`）。`orders.total` 是快取，唯一的事實來源是 `order_items`，任何品項異動都要經過 `repositories/orderRepository.js` 的 `refreshTotal` 重算。
 
 `order_items` 一律儲存 `name` 與 `unit_price`，`menu_item_id` 只是「這筆是從哪個菜單品項來的」的參照。這讓「菜單品項」與「自填品項」用同一張表表達，彙總與計價的程式碼完全不必分岔——這是支援自填功能最省事的模型。
 
@@ -198,6 +219,14 @@ create index idx_shares_order      on order_item_shares (order_id);
 `custom` 只存其他人、不存擁有者：擁有者必然要付，而且下單當下那張單的 id 還不存在。
 
 金額除不盡時（100 分三人），餘數以一元為單位逐一分配，起點依品項 id 輪替——固定從第一個人開始的話，排最前面的人會被每一筆除不盡的品項各多收一元。**總和永遠等於原金額**，這是 `server/smoke.js` 每一步都在驗的不變式。
+
+### 資料存取：Drizzle，但結構仍由 SQL 決定
+
+查詢一律走 Drizzle（`server/schema.js` 定義資料表與關聯，`server/db.js` 把它包在既有的 `pg` 連線池上）。換掉手寫 SQL 主要買到兩件事：欄位名打錯在載入時就會炸而不是上線後才回 undefined，以及讀一團訂單那段三層巢狀查詢——原本是一段帶 `json_agg` 與 `lateral` 的 SQL，現在是 `db.query.orders.findMany({ with: { items: { with: { shares: true } } } })`。連線池的設定（IPv4 優先、serverless 限一條）沒有變，Drizzle 只是查詢層。
+
+**但結構的來源仍然是 `server/migrations/*.sql`**，不是 `drizzle-kit`。原因是那幾支 migration 的註解本身就是設計決策的一部分：0005 與 0008 刻意只加欄位不刪舊的，因為 migration 會在新版程式部署之前跑完，那段空窗期舊版還在線上讀寫；`orders.status` 與 `orders.is_manager` 至今還留在資料庫裡就是這個原因。自動 diff 產生的 migration 看不到這件事，只會把它們一起砍掉。
+
+因此 `server/schema.js` 是「套用完之後的描述」而非來源，改結構的順序是先寫 SQL、跑 `npm run migrate`、再同步 schema。`drizzle.config.js` 只留給 `npm run db:pull`（把線上結構抓下來比對），`push` 與 `generate` 不要用。兩邊對不上時以資料庫為準——schema 寫錯只會讓查詢在執行期壞掉。
 
 ## 5. 身分與權限：無登入的 token 模型
 
@@ -218,7 +247,7 @@ create index idx_shares_order      on order_item_shares (order_id);
 | `manager` 協助管理者 | 代改代刪**任何人**的訂單與品項、批次改狀態，不受截止時間與品項狀態限制 |
 | `admin` 最高管理者 | 再加上指派別人的角色、關攤／重新開放、改截止時間、刪攤 |
 
-伺服器端以 HTTP header 驗證（`X-Edit-Token`、`X-Manage-Code`、`X-Admin-Token`），判定集中在 `lib/auth.js` 的 `resolveActor`，多個憑證同時存在時取最高的角色。前端的按鈕顯示與否只是體驗，**權限判斷一律在後端**。
+伺服器端以 HTTP header 驗證（`X-Edit-Token`、`X-Manage-Code`、`X-Admin-Token`），判定集中在 `services/permissionService.js` 的 `resolveActor`（規則在 `lib/roles.js`），多個憑證同時存在時取最高的角色。前端的按鈕顯示與否只是體驗，**權限判斷一律在後端**。
 
 **為什麼要有中間這一層。** 原本只有發起人與本人兩種身分，但發起人自己也在吃飯——收拾殘局（補價、改備註、把菜挪去分帳、跟店家點完後推進度）常常是坐在他旁邊那個人在做。把 `admin_token` 給出去可以解決，代價是那組 uuid 沒辦法用嘴巴念，而且一旦給了就收不回來——它不是一個「設定」，是一把鑰匙。
 
@@ -350,26 +379,41 @@ PATCH  /api/orders/:orderId/status          整張單一次改狀態    （不�
 頁首固定顯示：團名、店家、截止時間倒數
 ```
 
-Tailwind：`<div className="mx-auto max-w-[500px] min-h-dvh">`。用 `min-h-dvh` 而非 `min-h-screen`，避免手機瀏覽器網址列造成的高度跳動。
+骨架在 `components/ui.jsx` 的 `Layout`：`maxWidth: 500`、`mx: 'auto'`、`minHeight: '100dvh'`。用 `100dvh` 而非 `100vh`，避免手機瀏覽器網址列造成的高度跳動。
 
-### 路由
+### 路由（TanStack Router，純 CSR）
 
-| 路由 | 內容 |
-|---|---|
-| `/` | 開新團 ／ 輸入團號加入 |
-| `/new` | 開團：選店家、團名、你的名字、截止時間 |
-| `/g/:joinCode` | 團主頁，三個 tab：**點餐** ／ **清單** ／ **結帳** |
-| `/stores` | 店家與菜單管理 |
+| 路由 | 內容 | loader 預先備好 |
+|---|---|---|
+| `/` | 開新團 ／ 輸入團號加入 | —（本機清單，進頁面才逐團校正） |
+| `/new` | 開團：選店家、團名、你的名字、截止時間 | 店家列表 |
+| `/g/$joinCode` | 團主頁，三個 tab：**點餐** ／ **清單** ／ **結帳** | 整攤實況 |
+| `/stores` | 店家列表 ＋ 新增店家（可一併貼上菜單） | 店家列表 |
+| `/stores/$storeId` | 單一店家的菜單管理 | 店家列表 ＋ 該店菜單 |
+| 其他 | 一律導回 `/`（`defaultNotFoundComponent`） | — |
 
-手機上用 tab 而非多頁，可以避免來回導航時遺失捲動位置。
+route tree 寫在 `router.jsx`（code-based，不用檔案系統路由與 codegen——五條路由不值得多一層產生的檔案）。每條路由的 `loader` 只做一件事：`queryClient.ensureQueryData(...)`，所以畫面掛上去時資料已經在 Query 的快取裡，元件那一側照常 `useQuery` 讀同一個 key，不需要另外傳 loader 的回傳值。`defaultPreload: 'intent'` 讓連結在滑過時就先把 loader 跑掉。
+
+團主頁的三個 tab 是元件內的 state 而不是路由：手機上用 tab 而非多頁，可以避免來回導航時遺失捲動位置。菜單管理則刻意獨立成一條路由——那一頁的「退出一層」就是按返回鍵，該回到店家列表，而不是把整個管理頁關掉。
+
+### 伺服器資料：TanStack Query
+
+所有讀取都經過 `lib/queries.js` 的 query options（`storesQuery` / `menuQuery` / `groupQuery` / `similarGroupsQuery`），key 集中在同一個 `keys` 物件。幾個刻意的決定：
+
+- **憑證不進 query key。** `editToken` / `adminToken` / `manageCode` 存在 localStorage，`groupQuery` 的 `queryFn` 在發請求當下才去讀。憑證進 key 會讓同一攤在快取裡分裂成好幾份；改為「凡是動到憑證的動作都 invalidate 這個 key」。
+- **寫入一律走 `useAppMutation`**（`lib/queries.js`）：成功後把 `invalidates` 列出的 key 重讀一輪，取代改版前散在各元件的 `onChanged` / `onSaved` 回呼鏈。呼叫端的 `onSuccess` 先跑、重讀後跑——它改的通常是 localStorage 憑證或本機狀態，而那一次重讀會用到（最明顯的是剛驗過的管理代碼）。
+- **團主頁每 15 秒輪詢一次**，分頁切到背景時停止；再加上 `refetchOnWindowFocus`。大家坐在同一桌，別人剛加了什麼、餐到了沒有，本來就得重讀才看得到。頂上的重新整理按鈕留給「我現在就要看到」。
+- **4xx 不重試**（`queryClient.js`）：代碼打錯、團被刪掉、憑證不夠，再試幾次也是同一個答案。
 
 ### 檔案結構
 
 ```
 client/src/
-├── main.jsx
-├── App.jsx
+├── main.jsx                     QueryClientProvider ＋ RouterProvider
+├── router.jsx                   route tree、loader、pending／error／notFound 畫面
+├── queryClient.js               Query 全域預設：staleTime、4xx 不重試、切回分頁重讀
 ├── lib/api.js                   fetch 封裝，錯誤帶 HTTP status
+├── lib/queries.js               query keys／query options ＋ useAppMutation
 ├── lib/storage.js               localStorage：憑證、名字、參與過的團
 ├── lib/orderStatus.js           狀態顯示設定（轉移規則與後端一致）＋ 品項可改與否
 ├── lib/roles.js                 角色顯示設定（與後端 auth.js 一致）
@@ -378,7 +422,8 @@ client/src/
 │   ├── Home.jsx                 開團／加入／最近參與的（會自動校正已刪除的）
 │   ├── NewGroup.jsx
 │   ├── Group.jsx                含三個 tab
-│   └── Stores.jsx
+│   ├── Stores.jsx               店家列表 ＋ 新增店家
+│   └── StoreMenu.jsx            單一店家的菜單管理
 └── components/
     ├── ui.jsx                   Layout／Header／金額顯示等共用零件
     ├── OrderTab.jsx             登記暱稱 ＋ 菜單 ＋ 加點清單（置底可收合）
@@ -393,10 +438,14 @@ client/src/
 
 server/
 ├── index.js                     Express 啟動 + 靜態檔
-├── db.js                        pg Pool
-├── routes/{stores,groups,orders}.js
-├── lib/{auth,codes,pricing,validate,orderStatus,split,serialize}.js
-└── migrations/000*.sql
+├── db.js                        pg Pool ＋ Drizzle 實例
+├── schema.js                    Drizzle schema（資料表、索引、關聯）
+├── routes/{stores,groups,orders}.js         路徑 → controller
+├── controllers/{store,menu,group,order}Controller.js + http.js
+├── services/{store,menu,group,order,permission,item}Service.js
+├── repositories/{store,menuItem,group,order,orderItem}Repository.js
+├── lib/{roles,codes,pricing,validate,orderStatus,split,serialize,errors}.js
+└── migrations/000*.sql          結構的來源，schema.js 是套用後的描述
 ```
 
 **菜單為什麼要能貼 CSV。** 新開一家店最花時間的不是填店名，是後面那幾十樣品項，而那份菜單通常已經以某種表格形式存在了（照片打的、上次的試算表、店家給的清單）。解析放在**前端**：貼上之後要先看得到「這 23 樣會進去、第 5 行有問題」才敢按下去，錯誤得指到第幾行；後端因此只收乾淨的陣列，而且整批寫在一個 transaction 裡——有一列不合法就整批退回，不會留下匯入到一半的菜單讓人不知道從哪裡接。
@@ -405,7 +454,7 @@ server/
 
 **「我的單」為什麼不在點餐頁。** 點餐頁真正的工作是挑東西；挑完送出的結果跟別人送出的結果是同一份資料，分在兩個 tab 只會讓人為了確認自己點了什麼一直切回去。已送出的品項因此一律在清單頁看與改，自己那張置頂。點餐頁只留購物車，而且出現兩次：上面那份給剛挑完的人，置底收合的那份給已經滑到菜單深處、想確認一下再送出的人。
 
-**狀態歸屬**：購物車在送出前只存在前端（localStorage 草稿）；`editToken` / `adminToken` 存 localStorage；其餘一切以資料庫為唯一真實來源。
+**狀態歸屬**：購物車在送出前只存在前端；`editToken` / `adminToken` / `manageCode` 與參與過的團存 localStorage；其餘一切以資料庫為唯一真實來源，前端只透過 TanStack Query 快取它，不另外複製一份到元件 state。
 
 ## 9. 關鍵流程
 

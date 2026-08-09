@@ -14,12 +14,14 @@
 
 | 層 | 技術 |
 |---|---|
-| 前端 | React 19 + Vite + MUI 7 + React Router |
-| 後端 | Node 22 + Express 5 + `pg` |
+| 前端 | React 19 + Vite + MUI 7 + TanStack Router／Query（純 CSR） |
+| 後端 | Node 22 + Express 5 + Drizzle ORM（`pg` 驅動） |
 | 資料庫 | Neon Postgres（新加坡） |
 | 部署 | Vercel（新加坡 `sin1`） |
 
 前端為手機優先設計，版面最大 500px 置中。
+
+前端走**純 CSR**：Vite 產出的 `index.html` 只有一個空的 `#root`，路由由 TanStack Router 在瀏覽器解析，資料由 TanStack Query 抓取與快取，沒有 SSR、沒有預渲染。伺服器只負責 `/api/*` 與把靜態檔送出去。
 
 ---
 
@@ -147,6 +149,8 @@ npm run migrate
 
 因為 Vercel 的建置環境不保證能連到資料庫，且自動 migration 在多實例部署時可能同時執行。目前正式與本機共用同一個 Neon 資料庫；要隔離的話可用 Neon 的 branch 功能開一個 dev 分支。
 
+改結構的流程是**先寫 SQL 再同步 schema**：在 `server/migrations/` 新增一支 `000N_*.sql`、跑 `npm run migrate`，再回頭把 `server/schema.js` 改成一致。不要用 `drizzle-kit push` 或 `generate` —— 資料庫裡有幾支 migration 刻意留下的過渡欄位（`orders.status`、`orders.is_manager`）與 `_migrations` 這張表，自動產生的差異會把它們一起刪掉。要確認兩邊有沒有對不上，用 `npm run db:pull` 把線上結構抓下來比對。
+
 ## 驗證部署
 
 ```bash
@@ -157,7 +161,7 @@ curl -s $URL/api/stores                     # 應回菜單資料
 curl -s $URL/api/nope                       # 應為 404 JSON，不是 HTML
 curl -so /dev/null -w "%{http_code}\n" $URL/g/ABC123   # 應為 200，不是 404
 
-# 完整的 63 項端對端測試打在線上環境
+# 完整的 163 項端對端測試打在線上環境
 SMOKE_BASE_URL=$URL npm run smoke
 ```
 
@@ -189,7 +193,7 @@ npm run dev
 
 ```bash
 npm run dev:server   # 另開一個終端機
-npm run smoke        # 63 項端對端測試
+npm run smoke        # 163 項端對端測試
 ```
 
 驗證價格信任模型、權限控制、訂單狀態機、撤單金額排除、同名擋單、關團與截止時間等行為。
@@ -205,17 +209,28 @@ api/
 server/
 ├── app.js                createApp()，組裝 Express（不監聽）
 ├── index.js              一般 Node 主機進入點
-├── db.js                 連線池與 transaction helper
-├── lib/
-│   ├── auth.js           身分判定：參與者／協助管理者／最高管理者
+├── db.js                 pg 連線池、Drizzle 實例與 transaction helper
+├── schema.js             Drizzle schema（資料表、索引、關聯）
+├── routes/               路徑 → controller 對照，不放邏輯
+│   └── {stores,groups,orders}.js
+├── controllers/          HTTP 邊界：驗證輸入、讀憑證、決定狀態碼
+│   ├── http.js           readCredentials／intParam／uuidParam
+│   └── {store,menu,group,order}Controller.js
+├── services/             商業規則、權限、transaction
+│   ├── permissionService.js  身分判定（需查資料庫的那一步）
+│   ├── itemService.js        計價與分單驗證，下單與加點共用
+│   └── {store,menu,group,order}Service.js
+├── repositories/         全部的 Drizzle 查詢，第一個參數一律是 db 或 tx
+│   └── {store,menuItem,group,order,orderItem}Repository.js
+├── lib/                  純邏輯，不碰資料庫也不碰 Express
+│   ├── roles.js          角色定義與身分判斷規則
 │   ├── pricing.js        價格信任模型
 │   ├── orderStatus.js    訂單狀態機與轉移規則
 │   ├── split.js          分單金額重算
 │   ├── validate.js       zod schema
-│   ├── serialize.js      DB row → API 回應、彙總計算
+│   ├── serialize.js      Drizzle row → API 回應、彙總計算
 │   ├── codes.js          代碼產生（團號、管理代碼）
 │   └── errors.js
-├── routes/{stores,groups,orders}.js
 ├── migrations/           SQL migration 與執行器
 ├── seed.js               初始店家與菜單
 └── smoke.js              端對端測試
@@ -245,7 +260,7 @@ client/src/
 
 **沒有帳號系統**
 
-零阻力是這個工具的價值來源。改用四種憑證：`join_code`（分享用短碼）、`edit_token`（自己那張單，帶著被指派的角色）、`manage_code`（8 碼，協助管理者）、`admin_token`（發起人，恆為最高管理者）。除了 `join_code` 都存在 localStorage，換裝置會遺失，此時由管理者代為處理。權限判斷一律在後端（`server/lib/auth.js`）。
+零阻力是這個工具的價值來源。改用四種憑證：`join_code`（分享用短碼）、`edit_token`（自己那張單，帶著被指派的角色）、`manage_code`（8 碼，協助管理者）、`admin_token`（發起人，恆為最高管理者）。除了 `join_code` 都存在 localStorage，換裝置會遺失，此時由管理者代為處理。權限判斷一律在後端（規則在 `server/lib/roles.js`，把關在 `server/services/permissionService.js`）。
 
 **同攤不允許同名**
 
@@ -271,7 +286,7 @@ client/src/
 
 數量、品名、價格、備註、分單都能動，而且不受截止時間限制——改錯的價、補漏的備註、把某一樣挪去分帳，幾乎都發生在結束點餐之後。
 
-**三層權限**（`server/lib/auth.js`）
+**三層權限**（`server/lib/roles.js`）
 
 發起人自己也在吃飯，收拾殘局的常常是坐他旁邊那個人。但把 `admin_token` 給出去等於連刪攤的權力一起給，而且 uuid 沒辦法用嘴巴念。
 

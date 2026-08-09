@@ -2,13 +2,17 @@ import { ORDER_STATUSES, isCounted, rollupStatus } from './orderStatus.js';
 import { applySplits, buildSplitOverview } from './split.js';
 
 /**
- * DB row → API 回應。
- * 注意：edit_token 與 admin_token 絕不出現在任何列表或查詢回應中，
+ * Drizzle row → API 回應。
+ *
+ * 欄位名稱兩邊都是 camelCase（對應關係定義在 server/schema.js），
+ * 這裡剩下的工作是挑出可以外流的欄位、補上推導值。
+ *
+ * 注意：editToken 與 adminToken 絕不出現在任何列表或查詢回應中，
  * 只在建立當下回傳一次給持有者。
  */
 
 export const toStore = (row) => ({
-  id: Number(row.id),
+  id: row.id,
   name: row.name,
   phone: row.phone,
   note: row.note,
@@ -16,54 +20,56 @@ export const toStore = (row) => ({
 });
 
 export const toMenuItem = (row) => ({
-  id: Number(row.id),
-  storeId: Number(row.store_id),
+  id: row.id,
+  storeId: row.storeId,
   name: row.name,
   price: row.price,
   category: row.category,
   available: row.available,
-  sortOrder: row.sort_order,
-  priceUncertain: row.price_uncertain === true,
+  sortOrder: row.sortOrder,
+  priceUncertain: row.priceUncertain === true,
 });
 
 export const toOrderItem = (row) => ({
-  id: Number(row.id),
-  menuItemId: row.menu_item_id == null ? null : Number(row.menu_item_id),
+  id: row.id,
+  menuItemId: row.menuItemId ?? null,
   name: row.name,
-  unitPrice: row.unit_price,
+  unitPrice: row.unitPrice,
   qty: row.qty,
-  isCustom: row.is_custom,
-  priceUncertain: row.price_uncertain === true,
+  isCustom: row.isCustom,
+  priceUncertain: row.priceUncertain === true,
   // 這一樣的要求（不要香菜、去冰）。整張單的通則放在 order.note
   note: row.note ?? null,
   // 狀態屬於品項：同一張單裡先點的可能已到餐，後加的還沒點
   status: row.status,
-  statusChangedAt: row.status_changed_at,
+  statusChangedAt: row.statusChangedAt,
   counted: isCounted(row.status),
-  subtotal: row.unit_price * row.qty,
+  subtotal: row.unitPrice * row.qty,
   // 分單設定。實際付款人與金額由 lib/split.js 依全團的人重算後補上
-  shareScope: row.share_scope ?? 'owner',
-  sharedWith: row.shared_with ?? [],
+  shareScope: row.shareScope ?? 'owner',
+  sharedWith: row.sharedWith ?? [],
 });
 
 /**
+ * row 是 loadGroup 讀回來的團，store 掛在 row.store 上。
+ *
  * manageCode 只在呼叫端已經證明自己是發起人（或已經持有它）時才帶上，
  * 預設不外流——它是一把可以改全團訂單的鑰匙，不該出現在誰都讀得到的快照裡。
  */
 export const toGroup = (row, { manageCode = false } = {}) => ({
   id: row.id,
-  joinCode: row.join_code,
+  joinCode: row.joinCode,
   title: row.title,
-  hostName: row.host_name,
+  hostName: row.hostName,
   status: row.status,
-  deadlineAt: row.deadline_at,
-  createdAt: row.created_at,
+  deadlineAt: row.deadlineAt,
+  createdAt: row.createdAt,
   store: {
-    id: Number(row.store_id),
-    name: row.store_name,
-    phone: row.store_phone,
+    id: row.store.id,
+    name: row.store.name,
+    phone: row.store.phone,
   },
-  ...(manageCode ? { manageCode: row.manage_code } : {}),
+  ...(manageCode ? { manageCode: row.manageCode } : {}),
 });
 
 const emptyStatusCounts = () => Object.fromEntries(ORDER_STATUSES.map((s) => [s, 0]));
@@ -143,7 +149,7 @@ function mergeItems(items) {
  *
  * 已撤單的品項不進叫餐清單，也不算錢——留在清單上會多收。
  *
- * 傳入的 orders 必須已經過 applySplits（見 routes/groups.js 的 loadOrders），
+ * 傳入的 orders 必須已經過 applySplits（見 services/groupService.js 的 loadOrders），
  * 每個人的應付金額來自分單計算，不是自己點的東西加總。
  */
 export function buildSummary(orders) {

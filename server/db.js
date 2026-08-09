@@ -1,6 +1,8 @@
 import net from 'node:net';
 import dns from 'node:dns';
 import pg from 'pg';
+import { drizzle } from 'drizzle-orm/node-postgres';
+import * as schema from './schema.js';
 
 const { Pool } = pg;
 
@@ -22,6 +24,10 @@ const isLocal = /localhost|127\.0\.0\.1/.test(process.env.DATABASE_URL);
 // 真正的併發交給 Neon 的 pooler（連線字串中的 -pooler）處理。
 const isServerless = Boolean(process.env.VERCEL);
 
+/**
+ * 連線池仍由 pg 管理，Drizzle 只包在上面當查詢層。
+ * migrations/run.js 需要直接跑多語句的 .sql 檔，因此這裡照樣把 pool 導出。
+ */
 export const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   // Neon 憑證可通過完整驗證，不需放寬 rejectUnauthorized
@@ -34,20 +40,20 @@ pool.on('error', (err) => {
   console.error('[db] 連線池錯誤', err);
 });
 
-export const query = (text, params) => pool.query(text, params);
+/**
+ * 全域查詢入口。
+ *
+ * 帶上 schema 才有 db.query.<table>.findMany 這組關聯式查詢，
+ * 團的訂單連同品項與分單名單就靠它一次讀出來（見 routes/groups.js 的 loadOrders）。
+ */
+export const db = drizzle(pool, { schema });
 
-/** 在單一 transaction 中執行，失敗自動 rollback */
-export async function withTransaction(fn) {
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
-    const result = await fn(client);
-    await client.query('COMMIT');
-    return result;
-  } catch (err) {
-    await client.query('ROLLBACK');
-    throw err;
-  } finally {
-    client.release();
-  }
-}
+/**
+ * 在單一 transaction 中執行，失敗自動 rollback。
+ *
+ * 回呼收到的 tx 與 db 介面相同，因此所有 helper 都寫成「吃一個 executor」，
+ * 交易內外共用同一份程式碼。
+ */
+export const withTransaction = (fn) => db.transaction(fn);
+
+export const closeDb = () => pool.end();

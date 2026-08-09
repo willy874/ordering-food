@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { badRequest } from './errors.js';
 import { ORDER_STATUSES } from './orderStatus.js';
-import { ROLES } from './auth.js';
+import { ROLES } from './roles.js';
 
 const name = z.string().trim().min(1, '名稱不可為空').max(50, '名稱過長');
 // 上限放到 20 萬：酒吧的整支酒與套餐（例如香檳王一支 18,000）會超過四位數，
@@ -166,6 +166,22 @@ export const patchMenuItemSchema = z.object({
   sortOrder: z.number().int().optional(),
   priceUncertain: z.boolean().optional(),
 });
+
+/**
+ * uuid 格式。訂單 id 與各種 token 都是 uuid，格式不對的字串不能送進查詢——
+ * Drizzle 會照欄位型別轉換，資料庫拒絕轉型就是 500 而不是 404。
+ */
+export const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * 路徑參數上的整數 id。
+ *
+ * 不是純數字就回 null，讓呼叫端回 404。Drizzle 會照欄位型別把值送進去，
+ * 交給資料庫判斷的話 `/menu-items/abc` 會變成型別轉換錯誤，也就是 500。
+ */
+export function parseIntId(value) {
+  return /^\d+$/.test(String(value)) ? Number(value) : null;
+}
 
 /** 用 schema 驗證，失敗時丟出帶有可讀訊息的 400 */
 export function parse(schema, data) {

@@ -22,6 +22,7 @@ import RemoveIcon from '@mui/icons-material/Remove';
 import EditIcon from '@mui/icons-material/Edit';
 import DeleteOutlineIcon from '@mui/icons-material/DeleteOutline';
 import { api } from '../lib/api.js';
+import { keys, useAppMutation } from '../lib/queries.js';
 import { Empty, ItemTags, priceText, shareLabelOf } from './ui.jsx';
 import ItemStatusChip from './ItemStatusChip.jsx';
 import ItemEditDialog from './ItemEditDialog.jsx';
@@ -40,18 +41,41 @@ import { roleLabel } from '../lib/roles.js';
  * 管理者可以改任何人的。
  */
 export default function PeopleList({
+  joinCode,
   orders,
   myOrderId,
   tokens,
   canManage,
   accepting,
-  onChanged,
   onOrderDeleted,
 }) {
   const [error, setError] = useState('');
-  const [saving, setSaving] = useState(false);
   const [editing, setEditing] = useState(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
+
+  const invalidates = [keys.group(joinCode)];
+  const fail = (err) => setError(err.message);
+
+  const patchItem = useAppMutation({
+    mutationFn: ({ itemId, body, itemTokens }) => api.patchOrderItem(itemId, body, itemTokens),
+    invalidates,
+    onError: fail,
+  });
+
+  const removeItem = useAppMutation({
+    mutationFn: ({ itemId, itemTokens }) => api.deleteOrderItem(itemId, itemTokens),
+    invalidates,
+    onError: fail,
+  });
+
+  const removeOrder = useAppMutation({
+    mutationFn: ({ orderId, orderTokens }) => api.deleteOrder(orderId, orderTokens),
+    invalidates,
+    onSuccess: () => onOrderDeleted?.(),
+    onError: fail,
+  });
+
+  const saving = patchItem.isPending || removeItem.isPending || removeOrder.isPending;
 
   const participants = useMemo(
     () => orders.map((order) => ({ orderId: order.id, personName: order.personName })),
@@ -80,32 +104,19 @@ export default function PeopleList({
   /** 這一樣的品名與數量還動得了嗎（已跟店家點過的，本人就不能再動） */
   const basicsEditable = (item) => canEditItemBasics(item, canManage);
 
-  async function withSaving(fn) {
-    setError('');
-    setSaving(true);
-    try {
-      await fn();
-      await onChanged();
-    } catch (err) {
-      setError(err.message);
-    } finally {
-      setSaving(false);
-    }
-  }
-
   function changeQty(order, item, delta) {
+    setError('');
     const qty = item.qty + delta;
-    if (qty < 1) return withSaving(() => api.deleteOrderItem(item.id, tokensFor(order)));
+    const itemTokens = tokensFor(order);
+    if (qty < 1) return removeItem.mutate({ itemId: item.id, itemTokens });
     if (qty > 99) return undefined;
-    return withSaving(() => api.patchOrderItem(item.id, { qty }, tokensFor(order)));
+    return patchItem.mutate({ itemId: item.id, body: { qty }, itemTokens });
   }
 
-  async function removeMyOrder() {
+  function removeMyOrder() {
     setConfirmDelete(false);
-    await withSaving(async () => {
-      await api.deleteOrder(myOrder.id, tokensFor(myOrder));
-      onOrderDeleted?.();
-    });
+    setError('');
+    removeOrder.mutate({ orderId: myOrder.id, orderTokens: tokensFor(myOrder) });
   }
 
   // 整張單刪掉會連同已經點過的品項一起消失，所以跟單一品項同樣的規則：
@@ -192,7 +203,7 @@ export default function PeopleList({
                       </Typography>
                     )}
                     <Box sx={{ mt: 0.25 }}>
-                      <ItemStatusChip item={item} onChanged={onChanged} onError={setError} />
+                      <ItemStatusChip joinCode={joinCode} item={item} onError={setError} />
                     </Box>
                     {item.shared && (
                       <Typography variant="caption" color="text.disabled" display="block" noWrap>
@@ -228,7 +239,10 @@ export default function PeopleList({
                             size="small"
                             color="error"
                             disabled={saving}
-                            onClick={() => withSaving(() => api.deleteOrderItem(item.id, tokensFor(order)))}
+                            onClick={() => {
+                              setError('');
+                              removeItem.mutate({ itemId: item.id, itemTokens: tokensFor(order) });
+                            }}
                             aria-label={`刪除 ${item.name}`}
                           >
                             <DeleteOutlineIcon fontSize="small" />
@@ -306,7 +320,8 @@ export default function PeopleList({
         onSave={(patch) => {
           const { order, item } = editing;
           setEditing(null);
-          withSaving(() => api.patchOrderItem(item.id, patch, tokensFor(order)));
+          setError('');
+          patchItem.mutate({ itemId: item.id, body: patch, itemTokens: tokensFor(order) });
         }}
       />
 

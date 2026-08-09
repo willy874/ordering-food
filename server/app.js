@@ -47,7 +47,13 @@ export function createApp({ serveStatic = false } = {}) {
     if (err instanceof HttpError) {
       return res.status(err.status).json({ error: err.message });
     }
-    console.error('[error]', err);
+    // Drizzle 把驅動層的錯誤包成 DrizzleQueryError，訊息裡帶著完整 SQL 與參數，
+    // 而參數可能含 editToken／adminToken。只記錄原始的資料庫錯誤與 SQL 本身。
+    if (err?.query && err.cause) {
+      console.error('[error]', err.cause, '\n  query:', err.query);
+    } else {
+      console.error('[error]', err);
+    }
     res.status(500).json({ error: '伺服器發生錯誤' });
   });
 

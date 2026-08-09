@@ -61,6 +61,8 @@ export const api = {
   /** 刪攤：最高管理者以上 */
   deleteGroup: (joinCode, tokens) =>
     request(`/groups/${encodeURIComponent(joinCode)}`, { method: 'DELETE', ...tokens }),
+  /** 現在還收得了單的團，首頁用；不含任何憑證 */
+  listActiveGroups: () => request('/groups/active'),
   findSimilarGroups: (storeId, title) =>
     request(`/groups?storeId=${storeId}&title=${encodeURIComponent(title)}`),
 

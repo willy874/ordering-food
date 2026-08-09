@@ -133,7 +133,14 @@ export default function MenuCsvImport({
             <Button
               variant="contained"
               disabled={busy || items.length === 0}
-              onClick={() => onImport(items).then(() => setText(''))}
+              onClick={async () => {
+                try {
+                  await onImport(items);
+                  setText('');
+                } catch {
+                  // 匯入失敗時保留貼上的內容，讓使用者改一改再試一次
+                }
+              }}
             >
               {busy ? '匯入中…' : `匯入 ${items.length} 樣`}
             </Button>

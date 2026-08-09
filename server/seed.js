@@ -1,4 +1,6 @@
-import { pool, withTransaction } from './db.js';
+import { sql } from 'drizzle-orm';
+import { closeDb, withTransaction } from './db.js';
+import { menuItems, stores } from './schema.js';
 
 /**
  * 初始資料。
@@ -129,23 +131,27 @@ const STORES = [
   },
 ];
 
-await withTransaction(async (client) => {
-  await client.query('truncate stores restart identity cascade');
+await withTransaction(async (tx) => {
+  // cascade 會連同菜單、團與訂單一起清掉，這是 seed 的本意
+  await tx.execute(sql`truncate table ${stores} restart identity cascade`);
 
   for (const store of STORES) {
-    const { rows } = await client.query(
-      'insert into stores (name, phone, note) values ($1, $2, $3) returning id',
-      [store.name, store.phone, store.note],
-    );
-    const storeId = rows[0].id;
+    const [created] = await tx
+      .insert(stores)
+      .values({ name: store.name, phone: store.phone, note: store.note })
+      .returning({ id: stores.id });
 
-    for (const [index, [name, price, category, uncertain]] of store.menu.entries()) {
-      await client.query(
-        `insert into menu_items (store_id, name, price, category, sort_order, price_uncertain)
-         values ($1, $2, $3, $4, $5, $6)`,
-        [storeId, name, price, category, index * 10, uncertain === true],
-      );
-    }
+    await tx.insert(menuItems).values(
+      store.menu.map(([name, price, category, uncertain], index) => ({
+        storeId: created.id,
+        name,
+        price,
+        category,
+        sortOrder: index * 10,
+        priceUncertain: uncertain === true,
+      })),
+    );
+
     const uncertainCount = store.menu.filter((m) => m[3] === true).length;
     console.log(
       `✓ ${store.name}（${store.menu.length} 個品項${uncertainCount ? `，其中 ${uncertainCount} 個價格待確認` : ''}）`,
@@ -154,4 +160,4 @@ await withTransaction(async (client) => {
 });
 
 console.log('\n測試資料建立完成。');
-await pool.end();
+await closeDb();

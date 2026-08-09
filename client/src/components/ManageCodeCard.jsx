@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { Alert, Box, Button, Card, Divider, Stack, TextField, Typography } from '@mui/material';
 import ContentCopyIcon from '@mui/icons-material/ContentCopy';
 import { api } from '../lib/api.js';
+import { keys, useAppMutation } from '../lib/queries.js';
 import { storage } from '../lib/storage.js';
 import { roleLabel } from '../lib/roles.js';
 
@@ -17,18 +18,21 @@ import { roleLabel } from '../lib/roles.js';
  * 擺在最底下是因為它是「還沒有權限的人」才需要的入口：
  * 一攤十個人裡通常只有一個會用到它，擺上面等於九個人每次都要滑過去。
  */
-export default function ManageCodeCard({
-  joinCode,
-  group,
-  isHost,
-  canManage,
-  myRole,
-  onToast,
-  onChanged,
-}) {
+export default function ManageCodeCard({ joinCode, group, isHost, canManage, myRole, onToast }) {
   const [input, setInput] = useState('');
   const [error, setError] = useState('');
-  const [saving, setSaving] = useState(false);
+
+  const verify = useAppMutation({
+    mutationFn: (manageCode) => api.verifyManageCode(joinCode, manageCode),
+    invalidates: [keys.group(joinCode)],
+    // 先存憑證再重讀，這一輪才帶得上它——帶得上才拿得到只有管理者看得到的欄位
+    onSuccess: (result) => {
+      storage.setManageCode(joinCode, result.manageCode);
+      setInput('');
+      onToast?.('你現在是這一攤的協助管理者');
+    },
+    onError: (err) => setError(err.message),
+  });
 
   async function copy(text) {
     try {
@@ -39,24 +43,13 @@ export default function ManageCodeCard({
     }
   }
 
-  async function submit(event) {
+  function submit(event) {
     event.preventDefault();
     const trimmed = input.trim().toUpperCase();
     if (!trimmed) return setError('請輸入管理代碼');
 
-    setSaving(true);
     setError('');
-    try {
-      const result = await api.verifyManageCode(joinCode, trimmed);
-      storage.setManageCode(joinCode, result.manageCode);
-      setInput('');
-      onToast?.('你現在是這一攤的協助管理者');
-      await onChanged();
-    } catch (err) {
-      setError(err.message);
-    } finally {
-      setSaving(false);
-    }
+    return verify.mutate(trimmed);
   }
 
   if (isHost) {
@@ -137,10 +130,10 @@ export default function ManageCodeCard({
             <Button
               type="submit"
               variant="outlined"
-              disabled={saving || !input.trim()}
+              disabled={verify.isPending || !input.trim()}
               sx={{ flexShrink: 0 }}
             >
-              {saving ? '確認中…' : '確認'}
+              {verify.isPending ? '確認中…' : '確認'}
             </Button>
           </Stack>
           {error && <Alert severity="error">{error}</Alert>}

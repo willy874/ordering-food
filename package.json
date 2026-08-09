@@ -15,15 +15,18 @@
     "build": "npm --prefix client ci && npm --prefix client run build",
     "start": "node server/index.js",
     "migrate": "node --env-file=.env server/migrations/run.js",
+    "db:pull": "drizzle-kit pull",
     "seed": "node --env-file=.env server/seed.js",
     "smoke": "node --env-file=.env server/smoke.js"
   },
   "dependencies": {
+    "drizzle-orm": "^0.45.2",
     "express": "^5.1.0",
     "pg": "^8.13.1",
     "zod": "^3.24.1"
   },
   "devDependencies": {
-    "concurrently": "^9.1.2"
+    "concurrently": "^9.1.2",
+    "drizzle-kit": "^0.31.10"
   }
 }

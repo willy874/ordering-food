@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { Chip, ListItemText, Menu, MenuItem, Typography } from '@mui/material';
 import { api } from '../lib/api.js';
+import { keys, useAppMutation } from '../lib/queries.js';
 import { ORDER_STATUS, nextStatuses, statusColor, statusLabel } from '../lib/orderStatus.js';
 
 /**
@@ -9,24 +10,16 @@ import { ORDER_STATUS, nextStatuses, statusColor, statusLabel } from '../lib/ord
  * 不需要任何憑證——現場誰看到餐送來誰就能按，點的人可能正在廁所。
  * 只顯示合法的下一步，避免按到會被後端擋掉的選項。
  */
-export default function ItemStatusChip({ item, onChanged, onError }) {
+export default function ItemStatusChip({ joinCode, item, onError }) {
   const [anchor, setAnchor] = useState(null);
-  const [saving, setSaving] = useState(false);
+
+  const change = useAppMutation({
+    mutationFn: (status) => api.setItemStatus(item.id, status),
+    invalidates: [keys.group(joinCode)],
+    onError: (err) => onError?.(err.message),
+  });
 
   const options = nextStatuses(item.status);
-
-  async function change(status) {
-    setAnchor(null);
-    setSaving(true);
-    try {
-      await api.setItemStatus(item.id, status);
-      await onChanged();
-    } catch (err) {
-      onError?.(err.message);
-    } finally {
-      setSaving(false);
-    }
-  }
 
   return (
     <>
@@ -36,13 +29,19 @@ export default function ItemStatusChip({ item, onChanged, onError }) {
         size="small"
         variant={item.status === 'cancelled' ? 'outlined' : 'filled'}
         onClick={options.length > 0 ? (e) => setAnchor(e.currentTarget) : undefined}
-        disabled={saving}
+        disabled={change.isPending}
         aria-label={`${item.name} 目前${statusLabel(item.status)}，點擊修改`}
         sx={{ height: 22, fontSize: 11 }}
       />
       <Menu anchorEl={anchor} open={Boolean(anchor)} onClose={() => setAnchor(null)}>
         {options.map((status) => (
-          <MenuItem key={status} onClick={() => change(status)}>
+          <MenuItem
+            key={status}
+            onClick={() => {
+              setAnchor(null);
+              change.mutate(status);
+            }}
+          >
             <ListItemText
               primary={ORDER_STATUS[status]?.action ?? statusLabel(status)}
               secondary={ORDER_STATUS[status]?.hint}
@@ -51,7 +50,7 @@ export default function ItemStatusChip({ item, onChanged, onError }) {
           </MenuItem>
         ))}
       </Menu>
-      {saving && (
+      {change.isPending && (
         <Typography variant="caption" color="text.disabled" sx={{ ml: 0.5 }}>
           …
         </Typography>

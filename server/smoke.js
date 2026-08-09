@@ -6,7 +6,9 @@
  *
  * 測試資料一律以 [smoke] 開頭，結束後自動清除。
  */
-import { pool } from './db.js';
+import { count, eq, like } from 'drizzle-orm';
+import { closeDb, db } from './db.js';
+import { groupOrders, orders, stores } from './schema.js';
 
 const BASE = process.env.SMOKE_BASE_URL || 'http://localhost:3000';
 
@@ -34,8 +36,8 @@ async function call(path, { method = 'GET', body, headers = {} } = {}) {
 }
 
 async function cleanup() {
-  await pool.query(`delete from group_orders where title like '[smoke]%'`);
-  await pool.query(`delete from stores where name like '[smoke]%'`);
+  await db.delete(groupOrders).where(like(groupOrders.title, '[smoke]%'));
+  await db.delete(stores).where(like(stores.name, '[smoke]%'));
 }
 
 console.log(`\n對 ${BASE} 執行煙霧測試\n`);
@@ -303,6 +305,35 @@ const similar = await call(
 check('可查詢同名且收單中的團', similar.data.length >= 1 && similar.data[0].joinCode === dupe1.data.joinCode);
 check('同名團查詢不外流 adminToken', !JSON.stringify(similar.data).includes(dupe1.data.adminToken));
 
+// ── 進行中的清單 ──────────────────────────────────────────────
+console.log('\n進行中的清單');
+const activeList = await call('/groups/active');
+const activeDupe = activeList.data.find((g) => g.joinCode === dupe1.data.joinCode);
+check('剛開的團會出現在進行中清單', Boolean(activeDupe), `status=${activeList.status}`);
+check('清單帶得出店名與有效期限', activeDupe?.storeName === store.data.name && Boolean(activeDupe?.expiresAt));
+check('已關閉的團不在清單裡', !activeList.data.some((g) => g.joinCode === code));
+
+// 逾期的團仍是 open，但已經收不了單，不該再出現在首頁
+const expired = await call('/groups', {
+  method: 'POST',
+  body: {
+    storeId: store.data.id,
+    title: '[smoke] 逾期團',
+    hostName: '遲到王',
+    deadlineAt: new Date(Date.now() - 60_000).toISOString(),
+  },
+});
+const afterExpired = await call('/groups/active');
+check(
+  '超過截止時間的團不在清單裡',
+  !afterExpired.data.some((g) => g.joinCode === expired.data.joinCode),
+);
+check(
+  '進行中清單不外流 adminToken 與 manageCode',
+  !JSON.stringify(activeList.data).includes(dupe1.data.adminToken) &&
+    !JSON.stringify(activeList.data).includes(dupe1.data.manageCode),
+);
+
 const sameName1 = await call(`/groups/${dupe1.data.joinCode}/orders`, {
   method: 'POST',
   body: { personName: '小明', items: [{ menuItemId: bento.data.id, qty: 1 }] },
@@ -342,10 +373,11 @@ check('開團者可以刪團', delOk.status === 204, `status=${delOk.status}`);
 const gone = await call(`/groups/${dupe1.data.joinCode}`);
 check('刪除後查不到', gone.status === 404, `status=${gone.status}`);
 
-const orphan = await pool.query('select count(*)::int n from orders where id = $1', [
-  sameName1.data.orderId,
-]);
-check('團內訂單一併被刪除（cascade）', orphan.rows[0].n === 0);
+const [orphan] = await db
+  .select({ n: count() })
+  .from(orders)
+  .where(eq(orders.id, sameName1.data.orderId));
+check('團內訂單一併被刪除（cascade）', orphan.n === 0);
 
 // ── 品項狀態 ──────────────────────────────────────────────────
 console.log('\n品項狀態');
@@ -1108,7 +1140,7 @@ check(
 
 // ── 收尾 ──────────────────────────────────────────────────────
 await cleanup();
-await pool.end();
+await closeDb();
 
 console.log(`\n通過 ${passed} 項，失敗 ${failed} 項\n`);
 process.exit(failed ? 1 : 0);

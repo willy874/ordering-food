@@ -3,7 +3,7 @@
 本文是後端 CRUD 的**操作手冊**，目的是讓你不開介面、直接用程式（curl / fetch / node script）就能改店家、改菜單、下單、改狀態、對帳。
 
 - 架構與設計理由 → `docs/ARCHITECTURE.md`
-- 實際實作 → `server/routes/{stores,groups,orders}.js`、`server/lib/validate.js`
+- 實際實作 → `server/routes/` → `controllers/` → `services/` → `repositories/`、`server/lib/validate.js`
 - 前端已封裝好的呼叫 → `client/src/lib/api.js`（可當範例對照）
 
 ---
@@ -33,7 +33,7 @@ URL=https://ordering-food-mu.vercel.app/api
 
 ## 2. 憑證與權限
 
-沒有帳號系統，改用四種憑證（判定集中在 `server/lib/auth.js` 的 `resolveActor`，前端只用來決定按鈕顯不顯示）：
+沒有帳號系統，改用四種憑證（判定集中在 `server/services/permissionService.js` 的 `resolveActor`，前端只用來決定按鈕顯不顯示）：
 
 | 憑證 | 怎麼取得 | 放哪裡 | 對應角色 |
 |---|---|---|---|
@@ -42,7 +42,7 @@ URL=https://ordering-food-mu.vercel.app/api
 | `manageCode` | 開團回應，8 碼、同一套字母表 | HTTP header `X-Manage-Code` | `manager`（協助管理者） |
 | `adminToken` | 開團回應，uuid | HTTP header `X-Admin-Token` | `admin`（最高管理者），且是唯一刪得掉整攤的人 |
 
-三個角色，權力由小到大（定義在 `server/lib/auth.js`）：
+三個角色，權力由小到大（定義在 `server/lib/roles.js`）：
 
 | 角色 | 能做什麼 |
 |---|---|
@@ -74,9 +74,9 @@ URL=https://ordering-food-mu.vercel.app/api
 
 | 狀態碼 | 來源 | 典型情境 |
 |---|---|---|
-| 400 | `badRequest` | 欄位驗證失敗、團已關閉／逾期、品項不屬於本團店家、品項已下架、狀態不可轉移 |
+| 400 | `badRequest` | 欄位驗證失敗、團已關閉／逾期、品項不屬於本團店家、品項已下架、狀態不可轉移、PATCH 沒帶任何欄位 |
 | 403 | `unauthorized` | token 缺少或不符 |
-| 404 | `notFound` | 找不到店家／品項／團／訂單；**也包含 PATCH 菜單時沒帶任何欄位** |
+| 404 | `notFound` | 找不到店家／品項／團／訂單（`:id` 格式不對也算找不到） |
 | 409 | `conflict` | 同一團裡已經有同名的人下單 |
 | 500 | 未預期錯誤 | 例如把非數字當成 `:id`（`/menu-items/abc`）會讓 Postgres 型別轉換失敗 |
 
@@ -311,7 +311,7 @@ curl -s -X PATCH $URL/menu-items/12 -H 'Content-Type: application/json' -d '{"av
 curl -s -X PATCH $URL/menu-items/12 -H 'Content-Type: application/json' -d '{"price":260,"priceUncertain":false}'
 ```
 
-回傳更新後的完整 MenuItem。一個欄位都沒送會得到 `404 沒有要更新的欄位`（狀態碼確實是 404，不是 400）。
+回傳更新後的完整 MenuItem。一個欄位都沒送會得到 `400 沒有要更新的欄位`。
 
 ### `DELETE /menu-items/:id` — 刪除品項 → 204
 
@@ -343,6 +343,37 @@ curl -s -X POST $URL/groups -H 'Content-Type: application/json' -d '{
 - `manageCode` 是給幫忙改單的人的（見 §2）；之後帶 `X-Admin-Token` 讀團也拿得回來。
 - 店家必須存在且 `active`，否則 400。
 - **90 秒去重**：同店家 + 同團名 + 同開團者且在 90 秒內 → 不開新團，回傳既有的那個並帶 `reused: true`。條件收得緊是為了不誤判「每週都叫同一個團名」。用腳本連續建測試團時要注意這點（改團名或間隔超過 90 秒）。
+
+### `GET /groups/active` — 現在還收得了單的團
+
+首頁的「進行中的聚餐」用的就是這一支：沒拿到連結、也不知道團號的人，靠它找得到今天那一攤。無需憑證，**回應裡不含 `adminToken` 與 `manageCode`**。
+
+```bash
+curl -s $URL/groups/active
+```
+
+```jsonc
+[{ "joinCode": "K7M2QX", "title": "週五宵夜", "hostName": "小明",
+   "createdAt": "2026-08-08T03:10:22.031Z",
+   "deadlineAt": "2026-08-08T14:00:00.000Z",
+   "expiresAt": "2026-08-08T14:00:00.000Z",   // 排序依據，見下
+   "storeId": 1, "storeName": "橙店 OG CLUB",
+   "orderCount": 3 }]                          // 含只登記暱稱的空單
+```
+
+「還有效」的定義與下單時的檢查（`assertAcceptingOrders`）一致，差別只在沒設截止時間的團：
+
+| 情況 | 有效到什麼時候（`expiresAt`） |
+|---|---|
+| `status = 'closed'` | 不列出 |
+| 有 `deadlineAt` | `deadlineAt` |
+| 沒有 `deadlineAt` | **建立後三天**（`ACTIVE_WITHOUT_DEADLINE_HOURS = 72`） |
+
+沒設截止時間的團永遠不會自己過期，全列出來的話首頁很快就會塞滿沒人記得關的舊攤，所以補上這條界線——它只影響這份清單，**該團本身仍然收得了單**，用團號進去照樣點得到。
+
+依 `expiresAt` 由近而遠排序（最快截止的在最前面），最多 20 筆。
+
+⚠️ 任何知道網址的人都看得到所有進行中的團號並加入。這與「店家菜單 CRUD 不設防」是同一個取捨（內部工具、彼此信任）；換成陌生人會看到的場景就不該開這一支。
 
 ### `GET /groups?storeId=&title=` — 查同名的收單中團
 
@@ -778,6 +809,7 @@ import('./server/db.js').then(async ({ pool }) => {
 | 管理代碼給出去收不回來 | 只能整攤重開。要能收回請改用 `PATCH /orders/:orderId/role` 逐一指派。 |
 | 同團同名會 409 | `orders (group_order_id, person_name)` 有 unique index，因為彙總是按名字收錢的。 |
 | 90 秒內同店同團名同開團者不會開新團 | 回傳既有團並帶 `reused: true`。 |
+| 沒設截止時間的團三天後就從 `/groups/active` 消失 | 只是不再列在首頁，該團仍是 `open`、仍收得了單。要讓它繼續出現請設 `deadlineAt`。 |
 | 沒有整筆覆蓋的改單 API | 加點用 `POST /orders/:id/items`（只追加），改內容用 `PATCH /order-items/:id`（只動一列）。覆蓋會洗掉已到餐品項的狀態。 |
 | 改品項的名稱或價格會脫離菜單 | `menuItemId` 變 null、`isCustom` 變 true。只改 `qty`、`note` 或分單則保留連結。判斷依據是值有沒有變，不是欄位有沒有送。 |
 | 分單金額不是欄位 | `payers` / `payable` 每次讀取重算。`shareScope: "all"` 的分母會隨著有人登記或退出而改變，**同一個品項在不同時間讀到的金額可能不同**，這是設計如此。 |
@@ -788,7 +820,7 @@ import('./server/db.js').then(async ({ pool }) => {
 | 空單不會自動消失 | 品項刪光後那張單還在，`counted: false`，不計入人數與金額。 |
 | `deadlineAt` 一定要帶時區 | `2026-08-08T22:00:00` 會 400，要寫 `+08:00` 或 `Z`。 |
 | 批次改狀態會靜默略過 | 一定要檢查回應的 `skipped`。 |
-| `:id` 傳非數字會 500 | `/menu-items/abc`、`/stores/abc/menu` 會讓 Postgres 型別轉換失敗（訂單 id 有 UUID 格式檢查，會正確回 404）。 |
+| `:id` 傳非數字回 404 | `/menu-items/abc`、`/stores/abc/menu` 在進資料庫前就被擋下（訂單 id 走 UUID 格式檢查，同樣回 404）。`GET /groups?storeId=abc` 是查詢字串，回 400。 |
 | 金額上限 200000 | 超過就 400。上限同時寫在 `server/lib/validate.js`、`client/src/pages/Stores.jsx`、`client/src/components/OrderTab.jsx`，要改必須三處一起改。 |
 
 ---
@@ -810,6 +842,7 @@ DELETE /api/menu-items/:id                  硬刪除品項（會影響歷史訂
 
 POST   /api/groups                          開團 → { joinCode, adminToken,
                                                         manageCode, reused }
+GET    /api/groups/active                   現在還收得了單的團（首頁清單）
 GET    /api/groups?storeId=&title=          查同名收單中的團
 GET    /api/groups/:joinCode                團 + 菜單 + 所有訂單 + 彙總
                                             （帶憑證才回 group.manageCode）

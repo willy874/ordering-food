@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useState } from 'react';
-import { useParams, Link as RouterLink, useNavigate } from 'react-router-dom';
+import { useEffect, useState } from 'react';
+import { getRouteApi, useNavigate } from '@tanstack/react-router';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   Alert,
   Box,
@@ -21,6 +22,7 @@ import ContentCopyIcon from '@mui/icons-material/ContentCopy';
 import IosShareIcon from '@mui/icons-material/IosShare';
 import RefreshIcon from '@mui/icons-material/Refresh';
 import { api } from '../lib/api.js';
+import { groupQuery, keys, useAppMutation } from '../lib/queries.js';
 import { storage } from '../lib/storage.js';
 import { roleAtLeast } from '../lib/roles.js';
 import { Layout, Header, Empty, money } from '../components/ui.jsx';
@@ -29,6 +31,8 @@ import PeopleList from '../components/PeopleList.jsx';
 import GroupManage from '../components/GroupManage.jsx';
 import ManageCodeCard from '../components/ManageCodeCard.jsx';
 import Summary from '../components/Summary.jsx';
+
+const route = getRouteApi('/g/$joinCode');
 
 const TABS = [
   ['order', '點餐'],
@@ -48,103 +52,71 @@ function deadlineLabel(deadlineAt) {
 }
 
 export default function Group() {
-  const { joinCode } = useParams();
+  const { joinCode } = route.useParams();
   const code = (joinCode || '').toUpperCase();
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
 
-  const [data, setData] = useState(null);
-  const [error, setError] = useState('');
   const [tab, setTab] = useState('order');
-  const [closing, setClosing] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
-  const [deleting, setDeleting] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
+  const [error, setError] = useState('');
   const [toast, setToast] = useState('');
+
+  /**
+   * 大家坐在同一桌，別人剛剛加了什麼、餐到了沒有，都要重讀才看得到。
+   * 定時輪詢加上切回分頁時自動重讀（見 queryClient.js），
+   * 頂上那顆重新整理按鈕留給「我現在就要看到」的時候。
+   * 分頁在背景時不會輪詢，省手機的電與流量。
+   */
+  const { data, error: loadError, isFetching, refetch } = useQuery({
+    ...groupQuery(code),
+    refetchInterval: 15_000,
+  });
 
   const adminToken = storage.getAdminToken(code);
   const manageCode = storage.getManageCode(code);
   const stored = storage.getMyOrder(code);
-
-  const load = useCallback(async () => {
-    try {
-      // 帶上手上的憑證：發起人才拿得到 group.manageCode
-      const result = await api.getGroup(code, {
-        adminToken: storage.getAdminToken(code) ?? undefined,
-        manageCode: storage.getManageCode(code) ?? undefined,
-      });
-
-      // 本機記著一張伺服器上已經不存在的單（發起人代刪、或整團重來），
-      // 留著只會讓點餐頁一直對著一個空殼。清掉就會回到登記暱稱那一步。
-      const mine = storage.getMyOrder(code);
-      if (mine && !result.orders.some((order) => order.id === mine.orderId)) {
-        storage.clearMyOrder(code);
-      }
-
-      setData(result);
-      setError('');
-      storage.rememberGroup({
-        joinCode: result.group.joinCode,
-        title: result.group.title,
-        storeName: result.group.store.name,
-        createdAt: result.group.createdAt,
-        status: result.group.status,
-      });
-    } catch (err) {
-      // 團已經被刪掉：順手把本機清單與憑證一起清乾淨，
-      // 否則首頁會一直留著一個點進來只會報錯的項目
-      if (err.status === 404) storage.forgetGroup(code);
-      setError(err.message);
-      setData(null);
-    }
-  }, [code]);
+  const tokens = { editToken: stored?.editToken, adminToken, manageCode };
 
   useEffect(() => {
-    load();
-  }, [load]);
+    if (!data) return;
 
-  /**
-   * 手動重新整理。
-   * 大家坐在同一桌，別人剛剛加了什麼、餐到了沒有，都要重讀才看得到；
-   * 在還沒有輪詢之前，至少給一顆按得到的按鈕。
-   */
-  async function refresh() {
-    setRefreshing(true);
-    try {
-      await load();
-      setToast('已更新');
-    } finally {
-      setRefreshing(false);
+    // 本機記著一張伺服器上已經不存在的單（發起人代刪、或整團重來），
+    // 留著只會讓點餐頁一直對著一個空殼。清掉就會回到登記暱稱那一步。
+    const mine = storage.getMyOrder(code);
+    if (mine && !data.orders.some((order) => order.id === mine.orderId)) {
+      storage.clearMyOrder(code);
     }
-  }
 
-  async function toggleStatus() {
-    setClosing(true);
-    try {
-      await api.patchGroup(
-        code,
-        { status: data.group.status === 'open' ? 'closed' : 'open' },
-        { editToken: stored?.editToken, adminToken, manageCode },
-      );
-      await load();
-    } catch (err) {
-      setError(err.message);
-    } finally {
-      setClosing(false);
-    }
-  }
+    storage.rememberGroup({
+      joinCode: data.group.joinCode,
+      title: data.group.title,
+      storeName: data.group.store.name,
+      createdAt: data.group.createdAt,
+      status: data.group.status,
+    });
+  }, [data, code]);
 
-  async function removeGroup() {
-    setDeleting(true);
-    try {
-      await api.deleteGroup(code, { editToken: stored?.editToken, adminToken, manageCode });
+  const toggleStatus = useAppMutation({
+    mutationFn: (status) => api.patchGroup(code, { status }, tokens),
+    invalidates: [keys.group(code)],
+    onError: (err) => setError(err.message),
+  });
+
+  const removeGroup = useAppMutation({
+    mutationFn: () => api.deleteGroup(code, tokens),
+    onSuccess: () => {
       storage.forgetGroup(code);
-      navigate('/', { replace: true });
-    } catch (err) {
+      // 整攤都沒了，快取留著只會讓「返回上一頁」再看到一次它的殘影
+      queryClient.removeQueries({ queryKey: keys.group(code) });
+      navigate({ to: '/', replace: true });
+    },
+    onError: (err) => {
       setError(err.message);
-      setDeleting(false);
       setConfirmDelete(false);
-    }
-  }
+    },
+  });
 
   /** 代碼要用嘴巴唸給旁邊的人、或貼進聊天室，複製代碼本身比複製整段邀請常用 */
   async function copyCode() {
@@ -171,19 +143,7 @@ export default function Group() {
     }
   }
 
-  if (error && !data) {
-    return (
-      <Layout header={<Header title="找不到這一攤" back="/" />}>
-        <Stack spacing={2} sx={{ px: 2, py: 3 }}>
-          <Alert severity="error">{error}</Alert>
-          <Button component={RouterLink} to="/" variant="outlined" fullWidth>
-            回首頁
-          </Button>
-        </Stack>
-      </Layout>
-    );
-  }
-
+  // 進頁面時 loader 已經把資料準備好，這裡只會在快取被清掉時短暫出現
   if (!data) {
     return (
       <Layout header={<Header title="載入中" back="/" />}>
@@ -196,10 +156,11 @@ export default function Group() {
   const myOrderRecord = stored ? orders.find((o) => o.id === stored.orderId) : null;
   const isClosed = group.status !== 'open';
   const deadline = deadlineLabel(group.deadlineAt);
+  const busy = toggleStatus.isPending || removeGroup.isPending;
 
   // 角色有三條來源，取最高的那個：發起人（恆為最高管理者）、手上的管理代碼
   // （協助管理者），或被指派到這張單上的角色。
-  // 這裡只決定按鈕顯不顯示，真正的把關在後端（server/lib/auth.js）。
+  // 這裡只決定按鈕顯不顯示，真正的把關在後端（server/lib/roles.js 與 services/permissionService.js）。
   const isHost = Boolean(adminToken);
   const grantedRole = myOrderRecord?.role ?? 'participant';
   const myRole = isHost
@@ -209,7 +170,9 @@ export default function Group() {
       : 'manager';
   const canManage = roleAtLeast(myRole, 'manager');
   const canGrant = roleAtLeast(myRole, 'admin');
-  const tokens = { editToken: stored?.editToken, adminToken, manageCode };
+
+  // 背景重讀失敗時舊資料還在畫面上，把錯誤一併說出來就好，不要把整頁換掉
+  const banner = error || (loadError && !isFetching ? loadError.message : '');
 
   return (
     <Layout
@@ -228,8 +191,18 @@ export default function Group() {
                 aria-label={`複製代碼 ${code}`}
                 sx={{ letterSpacing: '0.1em', fontWeight: 600 }}
               />
+              {/* 轉圈只跟著「使用者自己按的那一次」，
+                  背景輪詢不該讓圖示每 15 秒自己動一下 */}
               <IconButton
-                onClick={refresh}
+                onClick={async () => {
+                  setRefreshing(true);
+                  try {
+                    await refetch();
+                    setToast('已更新');
+                  } finally {
+                    setRefreshing(false);
+                  }
+                }}
                 disabled={refreshing}
                 aria-label="重新整理"
                 sx={{ color: 'text.secondary' }}
@@ -278,7 +251,6 @@ export default function Group() {
           orders={orders}
           myOrder={myOrderRecord ? { order: myOrderRecord, editToken: stored.editToken } : null}
           canManage={canManage}
-          onSaved={load}
         />
       )}
 
@@ -293,15 +265,14 @@ export default function Group() {
             canManage={canManage}
             canGrant={canGrant}
             myOrderId={stored?.orderId}
-            onChanged={load}
           />
           <PeopleList
+            joinCode={code}
             orders={orders}
             myOrderId={stored?.orderId}
             tokens={tokens}
             canManage={canManage}
             accepting={!isClosed && !(group.deadlineAt && new Date(group.deadlineAt) < new Date())}
-            onChanged={load}
             onOrderDeleted={() => {
               storage.clearMyOrder(code);
               setTab('order');
@@ -315,7 +286,6 @@ export default function Group() {
             canManage={canManage}
             myRole={myRole}
             onToast={setToast}
-            onChanged={load}
           />
         </>
       )}
@@ -329,12 +299,15 @@ export default function Group() {
                 variant={isClosed ? 'outlined' : 'contained'}
                 color={isClosed ? 'primary' : 'error'}
                 fullWidth
-                onClick={toggleStatus}
-                disabled={closing || deleting}
+                onClick={() => {
+                  setError('');
+                  toggleStatus.mutate(isClosed ? 'open' : 'closed');
+                }}
+                disabled={busy}
               >
-                {closing ? '處理中…' : isClosed ? '重新開放點餐' : '結束點餐'}
+                {toggleStatus.isPending ? '處理中…' : isClosed ? '重新開放點餐' : '結束點餐'}
               </Button>
-              <Button color="error" onClick={() => setConfirmDelete(true)} disabled={deleting}>
+              <Button color="error" onClick={() => setConfirmDelete(true)} disabled={busy}>
                 刪除這一攤
               </Button>
               <Typography variant="caption" color="text.disabled" align="center">
@@ -345,9 +318,9 @@ export default function Group() {
         </>
       )}
 
-      {error && (
+      {banner && (
         <Box sx={{ px: 2, pb: 2 }}>
-          <Alert severity="error">{error}</Alert>
+          <Alert severity="error">{banner}</Alert>
         </Box>
       )}
 
@@ -359,11 +332,19 @@ export default function Group() {
           </DialogContentText>
         </DialogContent>
         <DialogActions>
-          <Button onClick={() => setConfirmDelete(false)} disabled={deleting}>
+          <Button onClick={() => setConfirmDelete(false)} disabled={removeGroup.isPending}>
             取消
           </Button>
-          <Button color="error" variant="contained" onClick={removeGroup} disabled={deleting}>
-            {deleting ? '刪除中…' : '確定刪除'}
+          <Button
+            color="error"
+            variant="contained"
+            onClick={() => {
+              setError('');
+              removeGroup.mutate();
+            }}
+            disabled={removeGroup.isPending}
+          >
+            {removeGroup.isPending ? '刪除中…' : '確定刪除'}
           </Button>
         </DialogActions>
       </Dialog>

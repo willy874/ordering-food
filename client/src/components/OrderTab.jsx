@@ -31,6 +31,7 @@ import ClearIcon from '@mui/icons-material/Clear';
 import EditIcon from '@mui/icons-material/Edit';
 import ExpandLessIcon from '@mui/icons-material/ExpandLess';
 import { api } from '../lib/api.js';
+import { keys, useAppMutation } from '../lib/queries.js';
 import { storage } from '../lib/storage.js';
 import { NameInput, ItemTags, priceText, shareLabelOf, MAX_PRICE } from './ui.jsx';
 import ItemEditDialog from './ItemEditDialog.jsx';
@@ -59,7 +60,7 @@ const toPayload = (items) =>
     sharedWith: item.sharedWith ?? [],
   }));
 
-export default function OrderTab({ joinCode, group, menu, orders = [], myOrder, onSaved }) {
+export default function OrderTab({ joinCode, group, menu, orders = [], myOrder }) {
   const existing = myOrder?.order ?? null;
 
   const accepting =
@@ -75,7 +76,7 @@ export default function OrderTab({ joinCode, group, menu, orders = [], myOrder, 
         </Box>
       );
     }
-    return <RegisterCard joinCode={joinCode} orders={orders} onRegistered={onSaved} />;
+    return <RegisterCard joinCode={joinCode} orders={orders} />;
   }
 
   return (
@@ -86,7 +87,6 @@ export default function OrderTab({ joinCode, group, menu, orders = [], myOrder, 
       existing={existing}
       editToken={myOrder.editToken}
       accepting={accepting}
-      onSaved={onSaved}
     />
   );
 }
@@ -98,10 +98,9 @@ export default function OrderTab({ joinCode, group, menu, orders = [], myOrder, 
  * 打成「小明」「小明 」「明」的時候，結帳就多出三個人。名字是這一團裡的身分，
  * 登記一次就固定下來。
  */
-function RegisterCard({ joinCode, orders, onRegistered }) {
+function RegisterCard({ joinCode, orders }) {
   const [name, setName] = useState(storage.getName());
   const [error, setError] = useState('');
-  const [saving, setSaving] = useState(false);
 
   const takenNames = useMemo(() => new Set(orders.map((o) => o.personName)), [orders]);
   const knownNames = useMemo(
@@ -109,29 +108,29 @@ function RegisterCard({ joinCode, orders, onRegistered }) {
     [takenNames],
   );
 
-  async function register() {
+  const register = useAppMutation({
+    // 登記出來的是一張還沒點東西的單。有單才有身分。
+    mutationFn: (personName) => api.createOrder(joinCode, { personName, items: [] }),
+    invalidates: [keys.group(joinCode)],
+    onSuccess: (created, personName) => {
+      storage.setMyOrder(joinCode, {
+        orderId: created.orderId,
+        editToken: created.editToken,
+        personName,
+      });
+      storage.rememberName(personName);
+    },
+    onError: (err) => setError(err.message),
+  });
+
+  function submit() {
     const trimmed = name.trim();
     setError('');
     if (!trimmed) return setError('請填一個暱稱');
     if (takenNames.has(trimmed)) {
       return setError(`這一團已經有「${trimmed}」了，換一個或加上區隔（例如「${trimmed}2」）`);
     }
-
-    setSaving(true);
-    try {
-      // 登記出來的是一張還沒點東西的單。有單才有身分。
-      const created = await api.createOrder(joinCode, { personName: trimmed, items: [] });
-      storage.setMyOrder(joinCode, {
-        orderId: created.orderId,
-        editToken: created.editToken,
-        personName: trimmed,
-      });
-      storage.rememberName(trimmed);
-      await onRegistered();
-    } catch (err) {
-      setError(err.message);
-      setSaving(false);
-    }
+    return register.mutate(trimmed);
   }
 
   return (
@@ -167,8 +166,13 @@ function RegisterCard({ joinCode, orders, onRegistered }) {
 
       {error && <Alert severity="error">{error}</Alert>}
 
-      <Button variant="contained" size="large" onClick={register} disabled={saving || !name.trim()}>
-        {saving ? '登記中…' : '登記，開始點餐'}
+      <Button
+        variant="contained"
+        size="large"
+        onClick={submit}
+        disabled={register.isPending || !name.trim()}
+      >
+        {register.isPending ? '登記中…' : '登記，開始點餐'}
       </Button>
     </Stack>
   );
@@ -183,7 +187,7 @@ function RegisterCard({ joinCode, orders, onRegistered }) {
  * 購物車出現兩次是刻意的：上面那份給「剛挑完、還沒往下滑」的人，
  * 置底那份收合著，給已經滑到菜單深處、想確認一下再送出的人。
  */
-function OrderEditor({ joinCode, menu, orders, existing, editToken, accepting, onSaved }) {
+function OrderEditor({ joinCode, menu, orders, existing, editToken, accepting }) {
   const [cart, setCart] = useState([]);
   const [note, setNote] = useState(existing.note ?? '');
   const [keyword, setKeyword] = useState('');
@@ -191,7 +195,6 @@ function OrderEditor({ joinCode, menu, orders, existing, editToken, accepting, o
   const [renaming, setRenaming] = useState(false);
   const [expanded, setExpanded] = useState(false);
   const [error, setError] = useState('');
-  const [saving, setSaving] = useState(false);
 
   const tokens = storage.tokensFor(joinCode, editToken);
 
@@ -279,26 +282,41 @@ function OrderEditor({ joinCode, menu, orders, existing, editToken, accepting, o
     );
   }
 
-  async function submit() {
-    setError('');
-    if (cart.length === 0 && !noteChanged) return setError('沒有要加點的東西');
-
-    setSaving(true);
-    try {
+  const save = useAppMutation({
+    mutationFn: async () => {
+      // 備註與品項是兩個 API，但對使用者是同一個「加點」動作，
+      // 所以綁在同一個 mutation 裡，兩邊都成功才算送出去了
       if (noteChanged) {
         await api.patchOrder(existing.id, { note: note.trim() || null }, tokens);
       }
       if (cart.length > 0) {
         await api.addOrderItems(existing.id, toPayload(cart), tokens);
       }
+    },
+    invalidates: [keys.group(joinCode)],
+    onSuccess: () => {
       setCart([]);
       setExpanded(false);
-      await onSaved();
-    } catch (err) {
-      setError(err.message);
-    } finally {
-      setSaving(false);
-    }
+    },
+    onError: (err) => setError(err.message),
+  });
+
+  const rename = useAppMutation({
+    mutationFn: (personName) => api.patchOrder(existing.id, { personName }, tokens),
+    invalidates: [keys.group(joinCode)],
+    onSuccess: (_result, personName) => {
+      storage.renameMe(joinCode, personName);
+      storage.rememberName(personName);
+    },
+    onError: (err) => setError(err.message),
+  });
+
+  const saving = save.isPending || rename.isPending;
+
+  function submit() {
+    setError('');
+    if (cart.length === 0 && !noteChanged) return setError('沒有要加點的東西');
+    return save.mutate();
   }
 
   const cartList = (
@@ -460,19 +478,10 @@ function OrderEditor({ joinCode, menu, orders, existing, editToken, accepting, o
         current={existing.personName}
         taken={orders.filter((o) => o.id !== existing.id).map((o) => o.personName)}
         onClose={() => setRenaming(false)}
-        onSave={async (personName) => {
+        onSave={(personName) => {
           setRenaming(false);
-          setSaving(true);
-          try {
-            await api.patchOrder(existing.id, { personName }, tokens);
-            storage.renameMe(joinCode, personName);
-            storage.rememberName(personName);
-            await onSaved();
-          } catch (err) {
-            setError(err.message);
-          } finally {
-            setSaving(false);
-          }
+          setError('');
+          rename.mutate(personName);
         }}
       />
 

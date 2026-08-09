@@ -21,19 +21,6 @@ export function generateJoinCode(length = 6) {
  */
 export const generateManageCode = () => generateJoinCode(8);
 
-/**
- * 產生一個資料庫中尚未使用的團號。
- * 6 碼在 31 個字元的字母表下約有 8.9 億種組合，實務上幾乎不會碰撞，
- * 但仍重試數次以防萬一。
- */
-export async function generateUniqueJoinCode(client, attempts = 8) {
-  for (let i = 0; i < attempts; i += 1) {
-    const code = generateJoinCode();
-    const { rowCount } = await client.query(
-      'select 1 from group_orders where join_code = $1',
-      [code],
-    );
-    if (rowCount === 0) return code;
-  }
-  throw new Error('無法產生不重複的團號');
-}
+// 「產生一個資料庫裡還沒被用掉的團號」需要查詢，因此放在
+// services/groupService.js 的 reserveJoinCode，這裡只留純產生。
+
