@@ -304,6 +304,7 @@ orders.role    最高管理者在清單頁直接指派某個已登記的參與�
 # 店家與菜單（無需憑證）
 GET    /api/stores                          列出啟用中的店家
 POST   /api/stores                          新增店家
+PATCH  /api/stores/:id                      修改店家資訊（name／phone／note）
 DELETE /api/stores/:id                      軟刪除店家
 GET    /api/stores/:id/menu                 取得店家菜單（含下架品項）
 POST   /api/stores/:id/menu                 新增菜單品項

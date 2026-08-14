@@ -138,6 +138,19 @@ export const createStoreSchema = z.object({
   note: z.string().trim().max(200).optional().nullable(),
 });
 
+/**
+ * 修改店家資訊。三個欄位都可選填，但至少要動一個——
+ * 空的 body 沒有意義，直接擋成 400 而不是送一趟什麼都不改的 UPDATE。
+ * phone／note 可為 null 表示清空。
+ */
+export const patchStoreSchema = z
+  .object({
+    name: name.optional(),
+    phone: z.string().trim().max(30).nullable().optional(),
+    note: z.string().trim().max(200).nullable().optional(),
+  })
+  .refine((value) => Object.keys(value).length > 0, '沒有要修改的欄位');
+
 export const createMenuItemSchema = z.object({
   name,
   price: money,

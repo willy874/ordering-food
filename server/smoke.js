@@ -48,6 +48,25 @@ console.log('店家與菜單');
 const store = await call('/stores', { method: 'POST', body: { name: '[smoke] 測試便當店' } });
 check('建立店家', store.status === 201 && store.data.id, `status=${store.status}`);
 
+const patchedStore = await call(`/stores/${store.data.id}`, {
+  method: 'PATCH',
+  body: { phone: '07-1234567', note: '午餐限定' },
+});
+check(
+  '修改店家資訊',
+  patchedStore.status === 200 && patchedStore.data.phone === '07-1234567' && patchedStore.data.note === '午餐限定',
+  `status=${patchedStore.status}`,
+);
+
+const clearedNote = await call(`/stores/${store.data.id}`, { method: 'PATCH', body: { note: null } });
+check('店家備註可清空', clearedNote.status === 200 && clearedNote.data.note === null);
+
+const emptyPatch = await call(`/stores/${store.data.id}`, { method: 'PATCH', body: {} });
+check('空的店家修改回 400', emptyPatch.status === 400, `status=${emptyPatch.status}`);
+
+const patchMissingStore = await call('/stores/999999999', { method: 'PATCH', body: { name: '不存在' } });
+check('修改不存在的店家回 404', patchMissingStore.status === 404, `status=${patchMissingStore.status}`);
+
 const bento = await call(`/stores/${store.data.id}/menu`, {
   method: 'POST',
   body: { name: '排骨便當', price: 90, category: '便當' },

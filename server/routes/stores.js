@@ -7,6 +7,7 @@ const router = Router();
 
 router.get('/stores', storeController.list);
 router.post('/stores', storeController.create);
+router.patch('/stores/:id', storeController.update);
 router.delete('/stores/:id', storeController.remove);
 
 router.get('/stores/:id/menu', menuController.list);

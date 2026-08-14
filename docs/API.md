@@ -240,11 +240,21 @@ curl -s -X POST $URL/stores -H 'Content-Type: application/json' -d '{
 
 回傳完整 Store（含新的 `id`）。`phone`、`note` 可省略。
 
+### `PATCH /stores/:id` — 修改店家資訊
+
+```bash
+curl -s -X PATCH $URL/stores/1 -H 'Content-Type: application/json' -d '{
+  "name": "改過的店名",
+  "phone": "07-7654321",
+  "note": null
+}'
+```
+
+三個欄位（`name`／`phone`／`note`）都可選填，只寫入這次帶來的欄位；`phone`／`note` 傳 `null` 表示清空。整包都沒帶回 400（`沒有要修改的欄位`），`name` 空字串回 400，找不到 id 回 404。回傳更新後的完整 Store。改店家資訊不影響菜單，也不影響已經開的團（團快照了店名／電話）。
+
 ### `DELETE /stores/:id` — 刪除店家 → 204
 
 **軟刪除**（`active = false`）。菜單、歷史團與訂單都留著，只是不再出現在 `GET /stores`。找不到 id 回 404。
-
-沒有「更新店家」的端點——要改名字或電話目前只能直接改資料庫（見 §11）。
 
 ---
 
@@ -779,7 +789,7 @@ npm run seed      # ⚠️ 會清空所有資料
 
 ### 方式 C：直接下 SQL（改單一欄位、或做 API 沒提供的操作）
 
-例如「更新店家名稱／電話」目前沒有 API：
+店家名稱／電話／備註現在可以用 `PATCH /stores/:id`（見 §6），下面這種直接改欄位的做法留給 API 沒覆蓋到的情況：
 
 ```bash
 node --env-file=.env -e "
@@ -832,6 +842,7 @@ GET    /api/health                          健康檢查
 
 GET    /api/stores                          列出啟用中的店家
 POST   /api/stores                          新增店家
+PATCH  /api/stores/:id                      修改店家資訊（name／phone／note）
 DELETE /api/stores/:id                      軟刪除店家（active = false）
 
 GET    /api/stores/:id/menu                 取得菜單（含下架品項）

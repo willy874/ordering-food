@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { getRouteApi } from '@tanstack/react-router';
+import { getRouteApi, useNavigate } from '@tanstack/react-router';
 import { useQuery } from '@tanstack/react-query';
 import {
   Alert,
@@ -33,6 +33,7 @@ const route = getRouteApi('/stores/$storeId');
 export default function StoreMenu() {
   const { storeId: param } = route.useParams();
   const storeId = Number(param);
+  const navigate = useNavigate();
 
   const { data: stores = [] } = useQuery(storesQuery());
   const { data: menu = [] } = useQuery(menuQuery(storeId));
@@ -43,11 +44,37 @@ export default function StoreMenu() {
   const [category, setCategory] = useState('');
   const [uncertain, setUncertain] = useState(false);
   const [editing, setEditing] = useState(null);
+  const [editingStore, setEditingStore] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
   const [error, setError] = useState('');
   const [toast, setToast] = useState('');
 
   const invalidates = [keys.menu(storeId)];
   const fail = (err) => setError(err.message);
+
+  const patchStore = useAppMutation({
+    mutationFn: (body) => api.patchStore(storeId, body),
+    invalidates: [keys.stores()],
+    onSuccess: () => {
+      setEditingStore(false);
+      setToast('已更新店家資訊');
+    },
+    onError: fail,
+  });
+
+  // 軟刪除：店家從清單消失，但已開的團與歷史紀錄不受影響。刪完退回店家列表
+  const removeStore = useAppMutation({
+    mutationFn: () => api.deleteStore(storeId),
+    invalidates: [keys.stores()],
+    onSuccess: () => {
+      setConfirmDelete(false);
+      navigate({ to: '/stores' });
+    },
+    onError: (err) => {
+      setConfirmDelete(false);
+      fail(err);
+    },
+  });
 
   const addItem = useAppMutation({
     mutationFn: (body) => api.addMenuItem(storeId, body),
@@ -103,6 +130,38 @@ export default function StoreMenu() {
     <Layout header={<Header title={store?.name ?? '菜單'} subtitle="管理菜單" back="/stores" />}>
       <Stack spacing={2.5} sx={{ px: 2, py: 2.5 }}>
         {error && <Alert severity="error">{error}</Alert>}
+
+        {store && (
+          <Card sx={{ p: 2 }}>
+            <Stack direction="row" alignItems="flex-start" spacing={1}>
+              <Box sx={{ minWidth: 0, flex: 1 }}>
+                <Typography variant="body2" fontWeight={500} noWrap>
+                  {store.name}
+                </Typography>
+                {store.phone && (
+                  <Typography variant="caption" color="text.secondary" noWrap component="p">
+                    {store.phone}
+                  </Typography>
+                )}
+                {store.note && (
+                  <Typography variant="caption" color="text.secondary" component="p">
+                    {store.note}
+                  </Typography>
+                )}
+              </Box>
+              <Button
+                size="small"
+                startIcon={<EditIcon fontSize="small" />}
+                onClick={() => {
+                  setError('');
+                  setEditingStore(true);
+                }}
+              >
+                編輯
+              </Button>
+            </Stack>
+          </Card>
+        )}
 
         {menu.length === 0 ? (
           <Empty>還沒有品項</Empty>
@@ -202,6 +261,20 @@ export default function StoreMenu() {
             return bulkImport.mutateAsync(items);
           }}
         />
+
+        {store && (
+          <Button
+            color="error"
+            startIcon={<DeleteOutlineIcon fontSize="small" />}
+            onClick={() => {
+              setError('');
+              setConfirmDelete(true);
+            }}
+            sx={{ alignSelf: 'center' }}
+          >
+            刪除這家店
+          </Button>
+        )}
       </Stack>
 
       <Snackbar
@@ -222,7 +295,95 @@ export default function StoreMenu() {
           patchItem.mutate({ id: item.id, body });
         }}
       />
+
+      <StoreEditDialog
+        store={editingStore ? store : null}
+        pending={patchStore.isPending}
+        onClose={() => setEditingStore(false)}
+        onSave={(body) => patchStore.mutate(body)}
+      />
+
+      <Dialog open={confirmDelete} onClose={() => setConfirmDelete(false)} fullWidth maxWidth="xs">
+        <DialogTitle sx={{ pb: 1 }}>刪除「{store?.name}」？</DialogTitle>
+        <DialogContent>
+          <Alert severity="warning" sx={{ py: 0.25 }}>
+            這家店會從清單消失、之後開不了新團。已經開的團與菜單紀錄不受影響。
+          </Alert>
+        </DialogContent>
+        <DialogActions sx={{ px: 3, pb: 2 }}>
+          <Button onClick={() => setConfirmDelete(false)}>取消</Button>
+          <Button color="error" variant="contained" onClick={() => removeStore.mutate()} disabled={removeStore.isPending}>
+            {removeStore.isPending ? '刪除中…' : '刪除'}
+          </Button>
+        </DialogActions>
+      </Dialog>
     </Layout>
+  );
+}
+
+/**
+ * 修改店家資訊：店名、電話、備註。
+ * key 綁在 store.id 上，換一家店時重置表單初始值。
+ */
+function StoreEditDialog({ store, pending, onClose, onSave }) {
+  return (
+    <Dialog open={Boolean(store)} onClose={onClose} fullWidth maxWidth="xs">
+      {store && <StoreEditForm key={store.id} store={store} pending={pending} onClose={onClose} onSave={onSave} />}
+    </Dialog>
+  );
+}
+
+function StoreEditForm({ store, pending, onClose, onSave }) {
+  const [name, setName] = useState(store.name);
+  const [phone, setPhone] = useState(store.phone ?? '');
+  const [note, setNote] = useState(store.note ?? '');
+  const [error, setError] = useState('');
+
+  function submit() {
+    const trimmed = name.trim();
+    if (!trimmed) return setError('請填寫店名');
+    onSave({
+      name: trimmed,
+      phone: phone.trim() || null,
+      note: note.trim() || null,
+    });
+  }
+
+  return (
+    <>
+      <DialogTitle sx={{ pb: 1 }}>編輯店家</DialogTitle>
+      <DialogContent>
+        <Stack spacing={2} sx={{ pt: 1 }}>
+          <TextField
+            label="店名"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            slotProps={{ htmlInput: { maxLength: 50 } }}
+          />
+          <TextField
+            label="電話（選填）"
+            value={phone}
+            onChange={(e) => setPhone(e.target.value)}
+            slotProps={{ htmlInput: { maxLength: 30 } }}
+          />
+          <TextField
+            label="備註（選填）"
+            value={note}
+            onChange={(e) => setNote(e.target.value)}
+            multiline
+            minRows={2}
+            slotProps={{ htmlInput: { maxLength: 200 } }}
+          />
+          {error && <Alert severity="error">{error}</Alert>}
+        </Stack>
+      </DialogContent>
+      <DialogActions sx={{ px: 3, pb: 2 }}>
+        <Button onClick={onClose}>取消</Button>
+        <Button variant="contained" onClick={submit} disabled={pending}>
+          {pending ? '儲存中…' : '確定'}
+        </Button>
+      </DialogActions>
+    </>
   );
 }
 

@@ -35,6 +35,9 @@ async function request(path, { method = 'GET', body, editToken, adminToken, mana
 export const api = {
   listStores: () => request('/stores'),
   createStore: (body) => request('/stores', { method: 'POST', body }),
+  /** 改店名／電話／備註，不動菜單 */
+  patchStore: (id, body) => request(`/stores/${id}`, { method: 'PATCH', body }),
+  /** 軟刪除：下架而非真的刪，歷史訂單還連著這家店 */
   deleteStore: (id) => request(`/stores/${id}`, { method: 'DELETE' }),
 
   getMenu: (storeId) => request(`/stores/${storeId}/menu`),

@@ -31,6 +31,12 @@ export async function insert(tx, values) {
   return row;
 }
 
+/** 部分更新店家資訊。回傳更新後的整列，找不到那一列回 null */
+export async function update(tx, id, values) {
+  const [row] = await tx.update(stores).set(values).where(eq(stores.id, id)).returning();
+  return row ?? null;
+}
+
 /** 下架而非刪除：歷史訂單還連著這家店。回傳是否真的有這一列 */
 export async function deactivate(tx, id) {
   const updated = await tx
