@@ -96,7 +96,8 @@ export function applySplits(orders) {
         if (payer.orderId !== order.id) {
           sharedIn.set(payer.orderId, sharedIn.get(payer.orderId) + payer.amount);
         }
-        if (item.counted && item.priceUncertain) uncertain.add(payer.orderId);
+        // 同樣只在留空價格的品項「有金額」時才算估價，見 lib/serialize.js 的 decorateOrder
+        if (item.counted && item.priceUncertain && item.subtotal !== 0) uncertain.add(payer.orderId);
       }
     }
   }
