@@ -102,7 +102,9 @@ export function decorateOrder(order) {
     itemCount: counted.reduce((sum, item) => sum + item.qty, 0),
     // 空單（品項都被刪光）不算一個人頭
     counted: counted.length > 0,
-    priceUncertain: counted.some((item) => item.priceUncertain),
+    // 留空價格的品項以 0 元計入，不會讓已經確定的金額變成約略值；
+    // 只有「猜了一個非 0 金額」的估價品項才算數，跟 buildSummary 的 uncertainSubtotal 同一套判斷。
+    priceUncertain: counted.some((item) => item.priceUncertain && item.subtotal !== 0),
   };
 }
 

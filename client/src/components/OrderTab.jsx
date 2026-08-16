@@ -226,7 +226,8 @@ function OrderEditor({ joinCode, menu, orders, existing, editToken, accepting })
 
   const cartCount = cart.reduce((sum, i) => sum + i.qty, 0);
   const cartTotal = cart.reduce((sum, item) => sum + item.unitPrice * item.qty, 0);
-  const cartUncertain = cart.some((i) => i.priceUncertain);
+  // 留空價格的品項以 0 元計入，不該讓這次加點裡其他已確定的金額被標成約略值
+  const cartUncertain = cart.some((i) => i.priceUncertain && i.unitPrice !== 0);
   const noteChanged = (note.trim() || null) !== (existing.note ?? null);
 
   function addMenuItem(menuItem) {

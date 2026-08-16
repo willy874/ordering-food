@@ -286,6 +286,45 @@ check(
   fuzzyDetail.data.summary.byItem.find((i) => i.name === '確定 30 元的湯')?.priceUncertain === false,
 );
 
+// 留空價格（0 元）的自填品項不該讓同一張單裡其他已確定的金額被標成約略值。
+// decorateOrder / applySplits 曾經只要「有」一筆留空品項就把整包金額標成 priceUncertain，
+// 即使那筆品項本身以 0 元計入、沒真的加錢——使用者會看到自己明明確定的錢被蓋上「≈」。
+const group4 = await call('/groups', {
+  method: 'POST',
+  body: { storeId: store2.data.id, title: '[smoke] 留空價格團', hostName: '小明' },
+});
+const blankOrder = await call(`/groups/${group4.data.joinCode}/orders`, {
+  method: 'POST',
+  body: {
+    personName: '阿明',
+    items: [
+      { name: '確定 100 元的菜', unitPrice: 100, qty: 1 },
+      { name: '還沒問老闆多少錢', unitPrice: 0, priceUncertain: true, qty: 1 },
+    ],
+  },
+});
+check(
+  '留空品項以 0 元計入總額（100+0=100）',
+  blankOrder.data?.total === 100,
+  `total=${blankOrder.data?.total}`,
+);
+
+const blankDetail = await call(`/groups/${group4.data.joinCode}`);
+const blankPerson = blankDetail.data.summary.byPerson.find((p) => p.personName === '阿明');
+check(
+  '留空品項不該讓已確定的 100 元被標成約略值',
+  blankPerson?.priceUncertain === false,
+  `priceUncertain=${blankPerson?.priceUncertain}`,
+);
+check(
+  '團體總結算也維持未標示估價（沒有任何非 0 的估價金額）',
+  blankDetail.data.summary.hasUncertainPrice === false,
+);
+check(
+  '待補價品項仍正確列在 pendingByItem，提醒補價',
+  blankDetail.data.summary.pendingByItem.some((i) => i.name === '還沒問老闆多少錢'),
+);
+
 // 前端謊報菜單品項的不確定性應無效——以資料庫為準
 const liedItem = await call(`/stores/${store2.data.id}/menu`, {
   method: 'POST',
