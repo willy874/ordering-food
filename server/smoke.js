@@ -642,7 +642,7 @@ check('其餘品項不受影響', afterDelItem.data.orders[0].items.length === 1
 
 // ── 截止時間 ──────────────────────────────────────────────────
 console.log('\n截止時間');
-const expired = await call('/groups', {
+const deadlineGroup = await call('/groups', {
   method: 'POST',
   body: {
     storeId: store.data.id,
@@ -651,7 +651,7 @@ const expired = await call('/groups', {
     deadlineAt: new Date(Date.now() - 60_000).toISOString(),
   },
 });
-const afterDeadline = await call(`/groups/${expired.data.joinCode}/orders`, {
+const afterDeadline = await call(`/groups/${deadlineGroup.data.joinCode}/orders`, {
   method: 'POST',
   body: { personName: '遲到的人', items: [{ menuItemId: bento.data.id, qty: 1 }] },
 });
