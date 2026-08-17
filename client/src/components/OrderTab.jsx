@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react';
 import {
   Alert,
+  Autocomplete,
   Box,
   Button,
   ButtonBase,
@@ -82,6 +83,7 @@ export default function OrderTab({ joinCode, group, menu, orders = [], myOrder }
   return (
     <OrderEditor
       joinCode={joinCode}
+      storeId={group.store.id}
       menu={menu}
       orders={orders}
       existing={existing}
@@ -187,7 +189,7 @@ function RegisterCard({ joinCode, orders }) {
  * 購物車出現兩次是刻意的：上面那份給「剛挑完、還沒往下滑」的人，
  * 置底那份收合著，給已經滑到菜單深處、想確認一下再送出的人。
  */
-function OrderEditor({ joinCode, menu, orders, existing, editToken, accepting }) {
+function OrderEditor({ joinCode, storeId, menu, orders, existing, editToken, accepting }) {
   const [cart, setCart] = useState([]);
   const [note, setNote] = useState(existing.note ?? '');
   const [keyword, setKeyword] = useState('');
@@ -219,6 +221,12 @@ function OrderEditor({ joinCode, menu, orders, existing, editToken, accepting })
     }
     return [...map.entries()];
   }, [menu, keyword]);
+
+  // 自填品項要「順手加進菜單」時，分類欄用得上：把這家店現有的分類列出來快填
+  const menuCategories = useMemo(
+    () => [...new Set(menu.map((item) => item.category).filter(Boolean))],
+    [menu],
+  );
 
   const availableCount = useMemo(() => menu.filter((item) => item.available).length, [menu]);
   const matchCount = categories.reduce((sum, [, items]) => sum + items.length, 0);
@@ -281,6 +289,13 @@ function OrderEditor({ joinCode, menu, orders, existing, editToken, accepting })
       }),
     );
   }
+
+  // 「加入店家菜單」：把自填品項寫進這家店的菜單，之後別人點得到。
+  // 菜單掛在團的快照上（見 groupService.getSnapshot），寫完重讀團就會出現。
+  const addToMenu = useAppMutation({
+    mutationFn: (body) => api.addMenuItem(storeId, body),
+    invalidates: [keys.group(joinCode)],
+  });
 
   const save = useAppMutation({
     mutationFn: async () => {
@@ -408,6 +423,8 @@ function OrderEditor({ joinCode, menu, orders, existing, editToken, accepting })
               <CustomItemForm
                 keyword={keyword}
                 people={otherPeople}
+                categories={menuCategories}
+                onAddToMenu={(body) => addToMenu.mutateAsync(body)}
                 onAdd={(item) => setCart((prev) => [...prev, { uid: nextUid(), ...item }])}
               />
             </Stack>
@@ -681,16 +698,21 @@ function RenameDialog({ open, current, taken, onClose, onSave }) {
  * 價格可以留空 —— 常見情況是先點了東西，結帳才知道多少錢；
  * 留空時以 0 元計入，並標為價格待確認，結帳時再補。
  */
-function CustomItemForm({ onAdd, keyword = '', people = [] }) {
+function CustomItemForm({ onAdd, keyword = '', people = [], categories = [], onAddToMenu }) {
   const [open, setOpen] = useState(false);
   const [name, setName] = useState('');
   const [price, setPrice] = useState('');
   const [note, setNote] = useState('');
   const [uncertain, setUncertain] = useState(false);
   const [share, setShare] = useState({ shareScope: 'owner', sharedWith: [] });
+  const [toMenu, setToMenu] = useState(false);
+  const [category, setCategory] = useState('');
+  const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
 
   const noPrice = price.trim() === '';
+  // 沒填價格就不能加進菜單——菜單品項一定要有價格，這也是勾選框的啟用條件
+  const canAddToMenu = !noPrice;
 
   function reset() {
     setName('');
@@ -698,17 +720,37 @@ function CustomItemForm({ onAdd, keyword = '', people = [] }) {
     setNote('');
     setUncertain(false);
     setShare({ shareScope: 'owner', sharedWith: [] });
+    setToMenu(false);
+    setCategory('');
     setError('');
     setOpen(false);
   }
 
-  function add() {
+  async function add() {
     const trimmed = name.trim();
     if (!trimmed) return setError('請填寫品名');
 
     const value = noPrice ? 0 : Number(price);
     if (!noPrice && (!Number.isInteger(value) || value < 0 || value > MAX_PRICE)) {
       return setError(`價格需為 0 ~ ${MAX_PRICE} 的整數`);
+    }
+
+    // 先把品項寫進店家菜單，成功了才加進購物車——菜單沒進去卻已加點，
+    // 使用者會以為兩件事都成了
+    if (toMenu && canAddToMenu) {
+      setBusy(true);
+      try {
+        await onAddToMenu?.({
+          name: trimmed,
+          price: value,
+          category: category.trim() || '主餐',
+          priceUncertain: uncertain,
+        });
+      } catch (err) {
+        setBusy(false);
+        return setError(err.message || '加入菜單失敗');
+      }
+      setBusy(false);
     }
 
     onAdd({
@@ -722,6 +764,7 @@ function CustomItemForm({ onAdd, keyword = '', people = [] }) {
       ...share,
     });
     reset();
+    return undefined;
   }
 
   if (!open) {
@@ -780,13 +823,51 @@ function CustomItemForm({ onAdd, keyword = '', people = [] }) {
         )}
         <Divider />
         <ShareSelect value={share} onChange={setShare} people={people} dense />
+
+        <Divider />
+        <Box>
+          <FormControlLabel
+            control={
+              <Checkbox
+                checked={toMenu && canAddToMenu}
+                disabled={!canAddToMenu}
+                onChange={(e) => setToMenu(e.target.checked)}
+              />
+            }
+            label={
+              <Typography variant="body2">
+                順手加進店家菜單{!canAddToMenu && '（先填價格才能加）'}
+              </Typography>
+            }
+          />
+          <Collapse in={toMenu && canAddToMenu}>
+            <Box sx={{ pt: 1 }}>
+              <Autocomplete
+                freeSolo
+                options={categories}
+                value={category}
+                onChange={(_, next) => setCategory(next ?? '')}
+                onInputChange={(_, next) => setCategory(next ?? '')}
+                renderInput={(params) => (
+                  <TextField
+                    {...params}
+                    label="分類"
+                    helperText="留空預設為「主餐」；可挑現有分類或自己打新的"
+                    slotProps={{ htmlInput: { ...params.inputProps, maxLength: 20 } }}
+                  />
+                )}
+              />
+            </Box>
+          </Collapse>
+        </Box>
+
         {error && <Alert severity="error">{error}</Alert>}
         <Stack direction="row" spacing={1}>
-          <Button variant="outlined" fullWidth onClick={reset}>
+          <Button variant="outlined" fullWidth onClick={reset} disabled={busy}>
             取消
           </Button>
-          <Button variant="contained" fullWidth onClick={add}>
-            加入
+          <Button variant="contained" fullWidth onClick={add} disabled={busy}>
+            {busy ? '加入中…' : '加入'}
           </Button>
         </Stack>
       </Stack>
