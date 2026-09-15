@@ -1,16 +1,204 @@
-# 聚會點餐機 — 出遊點餐與分帳
+# 聚會點餐機
 
-一群人出去玩，到店後各自用自己的手機開同一個連結點餐，最後彙總分帳：一份給店家叫餐，一份算每個人要付多少。
-
-進場先登記一個暱稱，之後就用這個身分點餐。逐項可以標進度（未點單／已點單／已到餐／撤單）、寫備註，也可以指定某一樣由誰一起分擔——一瓶酒全桌平分，或只跟旁邊那兩個人分。「清單」頁看得到全桌點了什麼與整體進度；結帳頁除了叫餐清單與每人應付，還有一張分單一覽，交代每筆金額是怎麼算出來的。
-
-權限分三層：參與者只改自己的單，協助管理者可以改所有人的單、跟店家點完後一次推進度，最高管理者再加上指派別人的權限與結束點餐。發起人預設是最高管理者，也可以把 8 碼的「管理代碼」念給幫忙結帳的人（那會給到協助管理者）。
+一群人出去玩，到店後各自用自己的手機開同一個連結點餐，最後一起結帳。
 
 **線上位址：https://ordering-food-mu.vercel.app**
 
-架構設計見 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)，API 完整參考（含用程式批次改菜單的做法）見 [`docs/API.md`](docs/API.md)，後續功能規劃見 [`docs/ROADMAP.md`](docs/ROADMAP.md)。
+---
 
-## 技術
+出去玩最麻煩的一段，不是玩，是結帳。
+
+十個人坐一桌，菜單傳一圈，有人點三樣、有人只喝一杯，中間那鍋湯大家分。到最後要算錢，一張紙傳過來傳過去，算到一半有人問「欸我那杯飲料算了沒」，整張又要重來。
+
+我想要的其實很簡單：大家各自在自己手機上點，系統幫我算兩件事——一份給店家叫餐，一份算每個人要付多少。
+
+就這樣。沒有帳號、不用註冊、不綁金流。開一攤，把連結丟群組，剩下的自己會長出來。
+
+下面照著實際用一次的順序走一遍。截圖是拿 Soshow Bar 這家店開的一攤「墾丁第二天晚餐」，三個人：阿德（發起人）、小美、阿凱。
+
+## 開一攤
+
+首頁只有三件事：開一攤、用代碼加入、看目前還在收單的攤。
+
+開一攤要填的東西也少——挑一家店、給這攤取個名字、寫下你自己的名字。名字是結帳時拿來算錢用的，所以一定要填。截止時間是選填，出去玩幾乎用不到，就收在後面折起來。
+
+按下去會拿到一組 6 碼代碼（例如 `JUJRWZ`）跟一條邀請連結。連結丟群組，大家點進來就是同一攤。
+
+<table>
+<tr>
+<td><img src="docs/images/01-home.png" width="235"></td>
+<td><img src="docs/images/04-new-group.png" width="235"></td>
+</tr>
+<tr>
+<td align="center">首頁：開一攤、用代碼加入、進行中的聚餐</td>
+<td align="center">開一攤：選店、取名、寫自己的名字</td>
+</tr>
+</table>
+
+## 先登記你是誰
+
+點進一攤，第一件事是登記暱稱。
+
+這一步看起來多餘，其實是被逼出來的。早期沒有這一步，每次送單都要重打一次名字，結果同一個人打成「小明」「小明 」「明」，結帳就多出三個人。所以現在暱稱先固定下來，之後點餐都用這個身分，不必再打。
+
+登記出來的其實就是一張「還沒有品項的訂單」。有了這張單，別人要把東西分給你一起付時，才選得到你。
+
+登記完就是菜單。菜單照店家分好的類別排（主食、小點、湯品、炸物），點一下加進購物車，再點一下加數量。菜單上沒有的東西，按「自己填一個」——珍奶、店家臨時推的隱藏菜，先點了結帳再補價格都行。
+
+<table>
+<tr>
+<td><img src="docs/images/05-register.png" width="235"></td>
+<td><img src="docs/images/06-order-menu.png" width="235"></td>
+</tr>
+<tr>
+<td align="center">進一攤先登記暱稱，這一攤就固定這個身分</td>
+<td align="center">菜單照類別排，點一下加入，可自己填品項</td>
+</tr>
+</table>
+
+## 分單，這攤最花心思的地方
+
+一瓶酒、一鍋湯、一大盤炸物，不是一個人吃的。記在誰頭上，那個人就被多收。
+
+所以每一樣東西自己說明「該分給誰」：只有我自己、全部平分，或指定的幾個人。點鉛筆改品項時就能選。
+
+<table>
+<tr>
+<td><img src="docs/images/07-item-edit-share.png" width="250"></td>
+</tr>
+<tr>
+<td align="center">改品項：品名、價格、數量、備註，還有「這一樣誰要付」</td>
+</tr>
+</table>
+
+這裡有個我特別小心的地方：**分到的金額不寫進資料庫，一律在讀取時重算。**
+
+原因是「全部平分」的分母會變。一鍋湯本來三個人分，晚到的阿凱又坐下來，就變四個人分。如果金額當初就寫死在資料庫，這時要回頭去改一票不相干的列，漏改一列就是一筆對不起來的帳。
+
+還有除不盡的零頭。220 元三個人分，73 加 73 加 73 是 219，少一塊。這一塊以一元為單位輪流分配，每一樣輪流從不同的人開始扣——固定從第一個人扣的話，排最前面那個人每一筆除不盡的都被多收一元。這樣算下來，總和永遠等於原本的金額。
+
+## 清單：誰點了什麼、餐到了沒
+
+點餐頁只管挑東西。挑完送出的結果，跟別人送出的結果是同一份資料，所以「已經點了什麼」統一在「清單」頁看。自己那張置頂。
+
+清單頁最上面是進度，但只有管理者看得到。進度把每一樣攤開來，照名稱或叫單時間排。要跟店家開口的人得知道那幾樣「未點單」到底是什麼、誰點的，光給個數字沒用。
+
+進度也能批次推：跟店家點完這一輪，按一顆「全部標為已點單」，只會動到還沒點的，已經到餐的不受影響。
+
+每個品項都有狀態——未點單、已點單、已到餐，另外還有撤單。**這是唯一不需要任何憑證就能改的動作**：服務生把酒端上桌時，點的人可能正在廁所，要求本人來按等於這個功能不會被用。同桌的人誰看到誰按。
+
+<table>
+<tr>
+<td><img src="docs/images/10-progress.png" width="235"></td>
+<td><img src="docs/images/11-status-menu.png" width="235"></td>
+</tr>
+<tr>
+<td align="center">進度攤開每一樣、可批次推；管理者限定</td>
+<td align="center">品項狀態點一下就能改，不需憑證</td>
+</tr>
+</table>
+
+清單往下是每個人的訂單，帶著分單算完的數字。像阿德這張：自己點了 $570，其中 $147 是別人幫他分擔的、他另外幫別人分擔了 $203，最後要付 $626。點過的東西狀態也在這裡看。
+
+<table>
+<tr>
+<td><img src="docs/images/08-list-full.png" width="250"></td>
+</tr>
+<tr>
+<td align="center">清單頁全貌：進度、每個人的單、最底下的管理代碼</td>
+</tr>
+</table>
+
+## 三層權限：發起人自己也在吃飯
+
+發起人不會整晚盯著手機。收拾殘局——補價、改備註、把某一樣挪去分帳、跟店家點完推進度——常常是坐他旁邊那個人在做。
+
+所以權限分三層：
+
+| 角色 | 能做什麼 |
+|---|---|
+| 參與者 | 只改自己的單，已跟店家點過的品項改不了品名與數量 |
+| 協助管理者 | 改所有人的品項、批次推進度，不受截止時間限制 |
+| 最高管理者 | 再加上指派別人的權限、結束或重新開放點餐、刪除整攤 |
+
+把管理權交出去有兩條路，刻意做成等價。一條是清單頁最底下那組 8 碼**管理代碼**，念給誰、誰就是協助管理者——不必事先登記，很適合「自己沒點什麼、但幫忙結帳」的人。另一條是在清單頁的權限下拉，**直接指派**某個已登記的參與者，用他原本的身分就有權限，隨時收得回來，也給得出最高管理者。
+
+<table>
+<tr>
+<td><img src="docs/images/09-role-assign.png" width="250"></td>
+</tr>
+<tr>
+<td align="center">清單頁指派權限：參與者／協助管理者／最高管理者</td>
+</tr>
+</table>
+
+管理代碼跟指派的差別在「收不收得回來」。代碼一旦念出去就收不回來，所以拿到代碼的人指派不了任何人——能拿代碼再生出更多管理者的話，就再也收束不了。指派則是在清單頁點下拉選單，降得回去。
+
+最高管理者可以再指派最高管理者，包含把「刪整攤」的權力也給出去。這聽起來危險，但發起人的憑證不在訂單表裡，被指派的人再怎麼互相降權都動不到他，他永遠收得回來。
+
+## 結帳：這攤真正的產出
+
+關掉點餐，結帳頁一次給三份東西。
+
+**給店家的訂單**：把所有人相同的品項合併起來，不分是誰點的、也不管進度——這是要念給店家或櫃檯的那份。
+
+**每個人要付多少**：一人一行，自己點多少、幫別人分擔多少，加起來就是應付。收錢的人看這份。
+
+**分單一覽**：哪幾樣被分著付、每個人各分到幾塊。有人覺得金額不對時，答案在這裡——連 73／73／74 那一塊零頭是怎麼分的都寫出來。
+
+三份都能一鍵複製成純文字，直接貼 LINE 或丟給試算表。
+
+<table>
+<tr>
+<td><img src="docs/images/12-checkout-full.png" width="250"></td>
+</tr>
+<tr>
+<td align="center">結帳頁：給店家的訂單、每人應付、分單一覽，都可複製</td>
+</tr>
+</table>
+
+## 店家與菜單
+
+店家跟菜單是先建好的，開攤時挑一家綁上去。
+
+新開一家店最花時間的不是填店名，是後面那幾十樣品項。而那份菜單通常已經以某種形式存在了——店家給的清單、上次的試算表、照片打的字。所以菜單可以直接**貼一整份 CSV** 進去：一行一樣，品名、價格、分類、排序、價格待確認。
+
+解析放在前端，貼上之後先告訴你「這 23 樣會進去、第 5 行有問題」，你看過才按下去。整批成立或整批退回，不會留下匯入到一半的菜單讓人不知道從哪接。
+
+菜單品項後續也能改品名、價格、分類，或直接下架。已經送出的訂單會保留當時的價格快照，不受影響。
+
+<table>
+<tr>
+<td><img src="docs/images/02-stores.png" width="235"></td>
+<td><img src="docs/images/03-store-menu.png" width="235"></td>
+</tr>
+<tr>
+<td align="center">新增店家：可以直接貼一整份 CSV 菜單</td>
+<td align="center">單一店家的菜單管理，逐樣可改可下架</td>
+</tr>
+</table>
+
+## 幾個沒寫在畫面上的決定
+
+**不做帳號系統。** 零阻力是這個工具的價值，要求註冊會直接殺掉使用率。改用四種憑證對應三個角色：團號（URL 裡）、自己那張單的 token、8 碼管理代碼、發起人的 admin token。除了團號都存在瀏覽器的 localStorage，換手機就得請管理者代勞。權限判斷一律在後端，前端的按鈕只是體驗。
+
+**狀態屬於品項，不屬於訂單。** 聚會是一輪一輪點的，先點的已經到餐時後加的還沒跟店家開口，整張單根本沒有單一狀態。所以訂單沒有狀態欄位，整張的狀態由最落後的那一項推導。
+
+**價格只信任到「自填」為止。** 自填品項要能填價格，就不能像一般點餐系統那樣完全不信前端；但菜單上的品項還是由伺服器決定價格，避免有人不小心把 90 元的排骨飯改成 9 元。金額永遠由伺服器重算，前端送來的一律丟掉。
+
+**同一攤不允許同名。** 結帳按名字算錢，兩個「小明」是實質錯帳，用唯一索引擋掉。
+
+**純 CSR 的前端。** 手機優先，版面最大 500px 置中。這是內部工具、要登記才看得到內容，沒有 SEO 需求，也就沒必要背 SSR 的複雜度。大家坐同一桌，清單每 15 秒輪詢一次，別人剛加了什麼、餐到了沒，不必一直按重新整理。
+
+更完整的設計取捨、資料模型與 API 契約，見下面幾份文件：
+
+- 架構設計：[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
+- API 完整參考（含用程式批次改菜單）：[`docs/API.md`](docs/API.md)
+- 後續功能規劃：[`docs/ROADMAP.md`](docs/ROADMAP.md)
+
+---
+
+# 技術
 
 | 層 | 技術 |
 |---|---|
@@ -19,55 +207,24 @@
 | 資料庫 | Neon Postgres（新加坡） |
 | 部署 | Vercel（新加坡 `sin1`） |
 
-前端為手機優先設計，版面最大 500px 置中。
+前端走純 CSR：Vite 產出的 `index.html` 只有一個空的 `#root`，路由由 TanStack Router 在瀏覽器解析，資料由 TanStack Query 抓取與快取。伺服器只負責 `/api/*` 與把靜態檔送出去。
 
-前端走**純 CSR**：Vite 產出的 `index.html` 只有一個空的 `#root`，路由由 TanStack Router 在瀏覽器解析，資料由 TanStack Query 抓取與快取，沒有 SSR、沒有預渲染。伺服器只負責 `/api/*` 與把靜態檔送出去。
+## 後端分層
 
----
-
-# 部署
-
-## 拓撲
+`/api/*` 底下一律走同一條路：
 
 ```
-              使用者（台灣）
-                    │
-                    ▼
-┌─────────────────────────────────────────┐
-│  Vercel — sin1（新加坡）                  │
-│                                         │
-│  CDN         client/dist  React 靜態檔    │
-│  Function    api/index.js  Express API   │
-└─────────────────────────────────────────┘
-                    │  約 2ms（同區）
-                    ▼
-┌─────────────────────────────────────────┐
-│  Neon — ap-southeast-1（新加坡）          │
-│  Postgres 18，pooled endpoint            │
-└─────────────────────────────────────────┘
+routes/         路徑 → controller 的對照表，不放任何邏輯
+controllers/    唯一碰得到 req／res 的一層：驗證 body、讀憑證、決定狀態碼
+services/       商業規則：權限、狀態轉移、截止時間、transaction 邊界
+repositories/   全部的 Drizzle 查詢，第一個參數一律是 executor（db 或 tx）
 ```
 
-## 為什麼這樣配置
-
-**App 與資料庫同區，而不是靠近使用者。**
-
-一次頁面載入會打三次資料庫，跨區成本要乘以三。實測比較（從台灣）：
-
-| 配置 | 使用者→App | App→DB ×3 | 實際總延遲 |
-|---|---|---|---|
-| **新加坡 + 新加坡（目前）** | 50ms | 約 6ms | **約 200ms** |
-| 台北 + 美東 Neon | 10ms | 600ms | 約 610ms |
-| 加州 + 美東 Neon | 130ms | 195ms | 約 325ms |
-
-台北機房離使用者最近，但每次查詢都要跨太平洋，反而最慢。
-
-**選 Vercel 而非其他免費平台**，關鍵在冷啟動。Render 免費方案閒置 15 分鐘休眠、喚醒 30–60 秒；一群人坐在餐廳裡同時開連結，第一個人等一分鐘是不能接受的。Vercel 實測穩定在 200ms 上下，沒有長尾。
-
-（其他曾評估的選項：Zeabur 已停用共享叢集，最低需租 $3/月伺服器；Fly.io 新帳號只剩 2 小時試用；Koyeb 已取消免費運算。）
+`lib/` 在這條線之外：純函式，不碰資料庫也不碰 Express（狀態機、分單、計價、序列化、zod schema）。
 
 ## 一份程式碼，兩種執行方式
 
-Express app 的「組裝」與「監聽」是分開的，讓同一份路由能在兩種環境執行：
+Express app 的「組裝」與「監聽」分開，同一份路由能在兩種環境跑：
 
 ```
 server/app.js          createApp()，只組裝不監聽
@@ -75,108 +232,19 @@ server/app.js          createApp()，只組裝不監聽
   └── api/index.js       Vercel：靜態檔由 CDN 送出，函式只處理 /api/*
 ```
 
-`server/routes/*` 與所有商業邏輯完全不知道自己跑在哪裡。要換回一般 Node 主機（Zeabur、Render、自架 VPS）時，`server/index.js` 這條路徑仍然完整可用，`zbpack.json` 也保留著。
+兩個 serverless 專屬的處理：`api/index.js` 會在 `req.url` 缺少 `/api` 前綴時補回；`server/db.js` 偵測到 `process.env.VERCEL` 時把連線池上限設為 1，真正的併發交給 Neon 的 pooler。
 
-**兩個 serverless 專屬的處理：**
+## 為什麼 App 與資料庫同區
 
-`api/index.js` 會在 `req.url` 缺少 `/api` 前綴時補回。Vercel 的重寫在某些情況會去除前綴，兩種形態都要能正確路由。
+一次頁面載入會打三次資料庫，跨區成本要乘以三。實測（從台灣）：
 
-`server/db.js` 在偵測到 `process.env.VERCEL` 時把連線池上限設為 1。每個函式實例都是獨立程序、可能同時存在數十個，各開一池會很快耗盡 Postgres 連線數；真正的併發交由 Neon 的 pooler 處理。
+| 配置 | 使用者→App | App→DB ×3 | 實際總延遲 |
+|---|---|---|---|
+| **新加坡 + 新加坡（目前）** | 50ms | 約 6ms | **約 200ms** |
+| 台北 + 美東 Neon | 10ms | 600ms | 約 610ms |
+| 加州 + 美東 Neon | 130ms | 195ms | 約 325ms |
 
-## vercel.json
-
-```json
-{
-  "installCommand": "npm ci",
-  "buildCommand": "npm run build",
-  "outputDirectory": "client/dist",
-  "regions": ["sin1"],
-  "functions": { "api/index.js": { "maxDuration": 15 } },
-  "rewrites": [
-    { "source": "/api/(.*)", "destination": "/api" },
-    { "source": "/(.*)", "destination": "/index.html" }
-  ]
-}
-```
-
-重寫規則依序比對，且只在檔案系統找不到對應檔案時才套用。因此 `/assets/*` 直接由 CDN 送出，`/api/*` 進函式，其餘（如 `/g/K7M2QX`）落到 `index.html` 交給前端路由 —— 深層路由重新整理不會 404。
-
-## 環境變數
-
-| 變數 | 設定於 | 說明 |
-|---|---|---|
-| `DATABASE_URL` | Vercel（Production／Preview／Development） | Neon **pooled** 連線字串，主機名稱須含 `-pooler` |
-| `PORT` | 僅本機與一般 Node 主機 | Vercel 不需要 |
-
-前端沒有任何環境變數 —— API 與前端同源，不需要 base URL。
-
-## 首次部署
-
-```bash
-# 1. 登入（會開瀏覽器）
-npx vercel login
-
-# 2. 連結專案
-npx vercel link --yes --project ordering-food
-
-# 3. 設定資料庫連線（三個環境各設一次）
-npx vercel env add DATABASE_URL production
-npx vercel env add DATABASE_URL preview
-npx vercel env add DATABASE_URL development
-
-# 4. 部署
-npx vercel deploy --prod --yes
-```
-
-## 後續部署
-
-目前**尚未連結 GitHub 自動部署**，push 不會觸發任何東西，每次要手動：
-
-```bash
-npm run deploy             # 正式環境
-npm run deploy:preview     # 預覽環境
-```
-
-`scripts/deploy.sh` 做的事就是下面這兩件，包成一支是因為兩件都很容易忘：
-
-```bash
-npx vercel deploy --prod --yes --scope take-6570   # 專案在團隊底下，少了 --scope 會回 Not authorized
-curl -s https://ordering-food-mu.vercel.app/api/health   # 部署完打幾支端點確認這一版真的活著
-```
-
-腳本會先提醒工作區有沒有未提交／未 push 的變更（**Vercel CLI 上傳的是本機檔案，不是 GitHub 上那份**），部署完再驗四件事：健康檢查、`/api/groups/active` 回得出 JSON 陣列、未知 API 回 404、深層路由回 200。有一項不過就以非 0 結束。
-
-團隊或網址換了的話用環境變數覆寫，不必改腳本：`VERCEL_SCOPE`、`DEPLOY_VERIFY_URL`。憑證過期時腳本會提示先跑 `npx vercel login`。
-
-要改成 push 即部署，到 Vercel 專案設定連結 GitHub repo（需在 repo 安裝 Vercel 的 GitHub App）。
-
-## 資料庫 migration
-
-Migration 從本機對資料庫執行，不在部署流程中自動跑：
-
-```bash
-npm run migrate
-```
-
-因為 Vercel 的建置環境不保證能連到資料庫，且自動 migration 在多實例部署時可能同時執行。目前正式與本機共用同一個 Neon 資料庫；要隔離的話可用 Neon 的 branch 功能開一個 dev 分支。
-
-改結構的流程是**先寫 SQL 再同步 schema**：在 `server/migrations/` 新增一支 `000N_*.sql`、跑 `npm run migrate`，再回頭把 `server/schema.js` 改成一致。不要用 `drizzle-kit push` 或 `generate` —— 資料庫裡有幾支 migration 刻意留下的過渡欄位（`orders.status`、`orders.is_manager`）與 `_migrations` 這張表，自動產生的差異會把它們一起刪掉。要確認兩邊有沒有對不上，用 `npm run db:pull` 把線上結構抓下來比對。
-
-## 驗證部署
-
-```bash
-URL=https://ordering-food-mu.vercel.app
-
-curl -s $URL/api/health                     # {"ok":true}
-curl -s $URL/api/stores                     # 應回菜單資料
-curl -s $URL/api/nope                       # 應為 404 JSON，不是 HTML
-curl -so /dev/null -w "%{http_code}\n" $URL/g/ABC123   # 應為 200，不是 404
-
-# 完整的 163 項端對端測試打在線上環境
-SMOKE_BASE_URL=$URL npm run smoke
-```
-
-`smoke` 的測試資料以 `[smoke]` 開頭並在結束後自動清除，可安全對正式環境執行。
+台北機房離使用者最近，但每次查詢都要跨太平洋，反而最慢。選 Vercel 而非其他免費平台，關鍵在冷啟動——一群人坐在餐廳裡同時開連結，第一個人等一分鐘是不能接受的。
 
 ---
 
@@ -198,7 +266,7 @@ npm run seed
 npm run dev
 ```
 
-開啟 http://localhost:5173，手機測試用同網段 IP 連 `http://<內網IP>:5173`（`dev` 已帶 `--host`）。
+開啟 http://localhost:5173 ，手機測試用同網段 IP 連 `http://<內網IP>:5173`（`dev` 已帶 `--host`）。
 
 ## 測試
 
@@ -207,15 +275,25 @@ npm run dev:server   # 另開一個終端機
 npm run smoke        # 163 項端對端測試
 ```
 
-驗證價格信任模型、權限控制、訂單狀態機、撤單金額排除、同名擋單、關團與截止時間等行為。
+驗證價格信任模型、權限控制、訂單狀態機、撤單金額排除、同名擋單、關團與截止時間等行為。測試資料以 `[smoke]` 開頭並在結束後自動清除，可安全對正式環境執行（`SMOKE_BASE_URL=<url> npm run smoke`）。
+
+## 部署
+
+目前尚未連結 GitHub 自動部署，每次手動：
+
+```bash
+npm run deploy             # 正式環境
+npm run deploy:preview     # 預覽環境
+```
+
+`scripts/deploy.sh` 會先提醒工作區有沒有未提交／未 push 的變更（Vercel CLI 上傳的是本機檔案，不是 GitHub 上那份），部署完再驗健康檢查、`/api/groups/active`、未知 API 回 404、深層路由回 200。改結構的流程是先寫 SQL 再同步 schema：新增 `server/migrations/000N_*.sql`、跑 `npm run migrate`、再把 `server/schema.js` 改成一致，不要用 `drizzle-kit push` 或 `generate`。部署細節見 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)。
 
 ---
 
 # 專案結構
 
 ```
-api/
-└── index.js              Vercel serverless 進入點
+api/index.js              Vercel serverless 進入點
 
 server/
 ├── app.js                createApp()，組裝 Express（不監聽）
@@ -223,103 +301,29 @@ server/
 ├── db.js                 pg 連線池、Drizzle 實例與 transaction helper
 ├── schema.js             Drizzle schema（資料表、索引、關聯）
 ├── routes/               路徑 → controller 對照，不放邏輯
-│   └── {stores,groups,orders}.js
 ├── controllers/          HTTP 邊界：驗證輸入、讀憑證、決定狀態碼
-│   ├── http.js           readCredentials／intParam／uuidParam
-│   └── {store,menu,group,order}Controller.js
 ├── services/             商業規則、權限、transaction
-│   ├── permissionService.js  身分判定（需查資料庫的那一步）
-│   ├── itemService.js        計價與分單驗證，下單與加點共用
-│   └── {store,menu,group,order}Service.js
 ├── repositories/         全部的 Drizzle 查詢，第一個參數一律是 db 或 tx
-│   └── {store,menuItem,group,order,orderItem}Repository.js
-├── lib/                  純邏輯，不碰資料庫也不碰 Express
-│   ├── roles.js          角色定義與身分判斷規則
-│   ├── pricing.js        價格信任模型
-│   ├── orderStatus.js    訂單狀態機與轉移規則
-│   ├── split.js          分單金額重算
-│   ├── validate.js       zod schema
-│   ├── serialize.js      Drizzle row → API 回應、彙總計算
-│   ├── codes.js          代碼產生（團號、管理代碼）
-│   └── errors.js
+├── lib/                  純邏輯：roles／pricing／orderStatus／split／validate／serialize／codes
 ├── migrations/           SQL migration 與執行器
 ├── seed.js               初始店家與菜單
 └── smoke.js              端對端測試
 
 client/src/
-├── theme.js              MUI theme（色票、圓角、44px 觸控下限）
-├── pages/{Home,NewGroup,Group,Stores}.jsx
+├── pages/{Home,NewGroup,Group,Stores,StoreMenu}.jsx
 ├── components/{ui,OrderTab,ItemStatusChip,ItemEditDialog,ShareSelect,
 │               GroupManage,ManageCodeCard,PeopleList,Summary,MenuCsvImport}.jsx
-└── lib/{api,storage,orderStatus,roles,menuCsv}.js
+└── lib/{api,queries,storage,orderStatus,roles,menuCsv}.js
 ```
 
-# 核心設計
-
-**價格信任模型**（`server/lib/pricing.js`）
-
-系統允許自填菜名與價格，因此不能完全不信任前端，但也不該全盤開放。判斷依據是有沒有送 `menuItemId`：
-
-- 有 → 忽略前端送的名稱與價格，一律以 `menu_items` 為準，並驗證品項屬於本攤店家且未下架
-- 無 → 視為自填品項，採用前端的值，但限制長度與金額範圍
-
-`total` 永遠由伺服器重算。
-
-**訂單狀態機**（`server/lib/orderStatus.js`）
-
-`未點單 → 已點單 → 已到餐`，另有 `待撤單 → 已撤單`。保留回退路徑以因應現場誤操作，但不允許跳關。**已撤單不列入結帳金額與叫餐清單** —— 這是狀態功能的重點，撤掉的單若仍計入總額，收錢時會多收。
-
-**沒有帳號系統**
-
-零阻力是這個工具的價值來源。改用四種憑證：`join_code`（分享用短碼）、`edit_token`（自己那張單，帶著被指派的角色）、`manage_code`（8 碼，協助管理者）、`admin_token`（發起人，恆為最高管理者）。除了 `join_code` 都存在 localStorage，換裝置會遺失，此時由管理者代為處理。權限判斷一律在後端（規則在 `server/lib/roles.js`，把關在 `server/services/permissionService.js`）。
-
-**同攤不允許同名**
-
-彙總按名字結算收錢，兩個「小明」是實質錯帳而非顯示問題，以唯一索引強制區隔。
-
-**暱稱要先登記**（`client/src/components/OrderTab.jsx`）
-
-第一次進一攤要先填暱稱，登記出來的是一張還沒有品項的訂單；之後點餐一律用這個身分，不再每次重打名字。先前每次送單都要填名字，打成「小明」「小明 」「明」時結帳就多出三個人。有身分還有第二個用途：別人要把東西分給你一起付，得先選得到你。
-
-**分單**（`server/lib/split.js`）
-
-一瓶酒、一份大拼盤不是一個人吃的，記在誰頭上都會讓那個人被多收。每個品項自己說明該分給誰：只有自己、全部平分，或指定的幾個人。
-
-金額**不存進資料庫**，一律在讀取時依當下的參與者重算——「全部平分」的分母會變，寫死就得回頭更新一票不相干的列，漏一列就是一筆對不起來的帳。除不盡的零頭以一元為單位輪流分配，總和永遠等於原金額。
-
-因此結帳有兩個數字：`ownTotal`（他點了多少）與 `payable`（他要付多少）。**收錢看 `payable`**。
-
-**備註分兩層**
-
-整張單的通則（「我晚點到」）掛在訂單上，單樣東西的要求（「不要香菜」）掛在品項上。一個人點三樣時，只有訂單層級的備註講不清楚是哪一樣，而叫餐清單合併相同品項時也要把備註算進合併鍵，否則「排骨飯 ×2」會把「不要香菜」那份吃掉。
-
-**發起人與管理者可以代改單一品項**
-
-數量、品名、價格、備註、分單都能動，而且不受截止時間限制——改錯的價、補漏的備註、把某一樣挪去分帳，幾乎都發生在結束點餐之後。
-
-**三層權限**（`server/lib/roles.js`）
-
-發起人自己也在吃飯，收拾殘局的常常是坐他旁邊那個人。但把 `admin_token` 給出去等於連刪攤的權力一起給，而且 uuid 沒辦法用嘴巴念。
-
-| 角色 | 能做什麼 |
-|---|---|
-| 參與者 | 只改自己的單，已跟店家點過的品項改不了品名與數量 |
-| 協助管理者 | 改所有人的品項、批次推進度，不受截止時間限制 |
-| 最高管理者 | 再加上指派別人的權限、結束或重新開放點餐、刪除整攤 |
-
-管理權有兩條等價來源：把**管理代碼**念給誰（不必事先登記，適合幫忙結帳的人，給到協助管理者），或在清單頁**直接指派**某個已登記的參與者（用他自己的 `edit_token` 就有權限，隨時可以收回，而且給得出最高管理者）。持管理代碼的人指派不了任何人——代碼給出去就收不回來，能再生管理者就收束不了了。
-
-發起人的權力全部指派得出去，包含刪除整攤——指派最高管理者就是把「跟我同級」講明了。安全感來自另一個地方：發起人的 `admin_token` 不在 `orders` 表裡，被指派的人再怎麼互相降權都動不到他。
-
-**點過的東西，本人就不能再改品名與數量**
-
-品項一旦離開「未點單」，店家那邊已經記下了品名與數量，App 這邊再改只會讓兩份單對不起來。要多點請另外加一筆，不要了請走撤單（本人也不能直接刪掉已點單的品項，否則刪掉重加就繞過了）。**價格、備註與分單不在限制內**——自填品項常常是「先點了，結帳才知道多少錢」，鎖住只會把工作全推回發起人身上。發起人與管理者不受此限。
+---
 
 # 已知事項
 
-- **Neon 連線可能 ETIMEDOUT**：Neon endpoint 同時有 A 與 AAAA 記錄，Node 20 起預設啟用的 `autoSelectFamily`（Happy Eyeballs）在沒有可用 IPv6 路由的網路上會嘗試 IPv6 後卡住且不 fallback。`server/db.js` 已用 `net.setDefaultAutoSelectFamily(false)` 搭配 `dns.setDefaultResultOrder('ipv4first')` 處理。若日後把資料庫連線搬到其他檔案，記得沿用。
-- `DATABASE_URL` 必須使用 **pooled** endpoint（主機名稱含 `-pooler`），serverless 環境尤其重要。
-- Vercel Hobby 方案條款為**非商業用途**。
-- 知道代碼的人可以看到該攤所有人的訂單。朋友一起出遊的情境下這本來就是共享資訊。
-- 自填品項與標記「價格待確認」的品項無法由系統核對金額，彙總會標示估算部分佔多少。
-- 本專案為 public repo，`.env` 由 `.gitignore` 排除；提交前務必確認資料庫憑證未進入版控。
+- **不做帳號系統**：知道團號的人就看得到該攤所有人的訂單。朋友一起出遊的情境下這本來就是共享資訊。
+- **憑證存 localStorage**：換手機或清快取後改不了自己的單，此時由管理者代改代刪。管理代碼給出去收不回來，要能收回請改用清單頁的權限下拉。
+- **自填價格無法核對**：打錯價格會影響對帳，彙總頁把自填與「價格待確認」的品項標示出來讓大家核對。
+- **Neon 連線可能 ETIMEDOUT**：`server/db.js` 已用 `net.setDefaultAutoSelectFamily(false)` 搭配 `dns.setDefaultResultOrder('ipv4first')` 處理 Happy Eyeballs 在無 IPv6 路由時卡住的問題，搬動資料庫連線時記得沿用。
+- `DATABASE_URL` 必須使用 pooled endpoint（主機名稱含 `-pooler`）。
+- Vercel Hobby 方案條款為非商業用途。
+- 本專案為 public repo，`.env` 由 `.gitignore` 排除，提交前務必確認資料庫憑證未進版控。
